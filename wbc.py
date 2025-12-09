@@ -15,7 +15,7 @@ Notes:
 from dataclasses import dataclass
 from typing import Optional, Sequence
 import torch
-import math.
+import math
 
 
 try:
@@ -235,7 +235,7 @@ class Wbc:
         task_2 = self.formulateContactForceTask()
 
         # Create nested hierarchical problems: task_0 is highest priority
-        dev = device
+        dev = device if device is not None else torch.device('cpu')
         ho0 = HoQp(task_0, None, device=dev, dtype=dtype)
         ho1 = HoQp(task_1, ho0, device=dev, dtype=dtype)
         ho2 = HoQp(task_2, ho1, device=dev, dtype=dtype)
@@ -245,7 +245,8 @@ class Wbc:
 
 if __name__ == "__main__":
     # Quick smoke test to ensure integration with ho_qp works
-    dev = torch.device('cpu')
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Using device:", dev)
     dtype = torch.float64
     info = CentroidalModelInfoSimple(generalizedCoordinatesNum=18, actuatedDofNum=12, numThreeDofContacts=4, robotMass=30.0)
     pino = FakePinocchioInterface(info, device=dev, dtype=dtype)
