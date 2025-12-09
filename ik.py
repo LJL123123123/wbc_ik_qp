@@ -25,6 +25,9 @@ class Model_cusadi:
         self._data.state = torch.zeros(self._data.nv, device=self.device, dtype=self.dtype)
         self._data.input = torch.zeros(self._data.nu, device=self.device, dtype=self.dtype)
 
+        #CoM_cusadi
+        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_position.casadi"))
+
         # Foot_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_position.casadi"))
         self.LF_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
