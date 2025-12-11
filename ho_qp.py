@@ -15,6 +15,7 @@ The API follows the C++ class closely: Task, HoQp with similar getters.
 """
 from typing import Optional
 import torch
+from wbc_ik_qp.ik import *
 
 
 class Task:
@@ -49,11 +50,34 @@ class Task:
         self.f_ = torch.zeros(0, device=device, dtype=dtype) if f is None else f
 
     def __add__(self, rhs: "Task") -> "Task":
-        # Concatenate rows (stack tasks)
-        a = torch.cat([self.a_, rhs.a_], dim=0) if self.a_.numel() and rhs.a_.numel() else (rhs.a_ if self.a_.numel()==0 else self.a_)
-        b = torch.cat([self.b_, rhs.b_], dim=0) if self.b_.numel() and rhs.b_.numel() else (rhs.b_ if self.b_.numel()==0 else self.b_)
-        d = torch.cat([self.d_, rhs.d_], dim=0) if self.d_.numel() and rhs.d_.numel() else (rhs.d_ if self.d_.numel()==0 else self.d_)
-        f = torch.cat([self.f_, rhs.f_], dim=0) if self.f_.numel() and rhs.f_.numel() else (rhs.f_ if self.f_.numel()==0 else self.f_)
+        # Concatenate rows (stack tasks).
+        # If the two tasks have differing numbers of columns, pad the smaller
+        # matrices with zeros on the right so torch.cat succeeds.
+        def pad_to_cols(mat: torch.Tensor, cols: int) -> torch.Tensor:
+            if mat.numel() == 0:
+                return torch.zeros((0, cols), device=mat.device, dtype=mat.dtype)
+            if mat.shape[1] == cols:
+                return mat
+            new = torch.zeros((mat.shape[0], cols), device=mat.device, dtype=mat.dtype)
+            new[:, :mat.shape[1]] = mat
+            return new
+
+        # Determine target column counts for 'a' and 'd'
+        a_cols = max(self.a_.shape[1] if self.a_.numel() else 0, rhs.a_.shape[1] if rhs.a_.numel() else 0)
+        d_cols = max(self.d_.shape[1] if self.d_.numel() else 0, rhs.d_.shape[1] if rhs.d_.numel() else 0)
+
+        a_padded_left = pad_to_cols(self.a_, a_cols)
+        a_padded_right = pad_to_cols(rhs.a_, a_cols)
+        a = torch.cat([a_padded_left, a_padded_right], dim=0) if a_cols > 0 else torch.zeros((0, 0), device=self.a_.device if self.a_.numel() else rhs.a_.device, dtype=self.a_.dtype if self.a_.numel() else rhs.a_.dtype)
+
+        b = torch.cat([self.b_, rhs.b_], dim=0) if self.b_.numel() and rhs.b_.numel() else (rhs.b_ if self.b_.numel() == 0 else self.b_)
+
+        d_padded_left = pad_to_cols(self.d_, d_cols)
+        d_padded_right = pad_to_cols(rhs.d_, d_cols)
+        d = torch.cat([d_padded_left, d_padded_right], dim=0) if d_cols > 0 else torch.zeros((0, 0), device=self.d_.device if self.d_.numel() else rhs.d_.device, dtype=self.d_.dtype if self.d_.numel() else rhs.d_.dtype)
+
+        f = torch.cat([self.f_, rhs.f_], dim=0) if self.f_.numel() and rhs.f_.numel() else (rhs.f_ if self.f_.numel() == 0 else self.f_)
+
         return Task(a=a, b=b, d=d, f=f)
 
     @staticmethod

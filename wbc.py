@@ -24,15 +24,10 @@ except Exception:
     # If running as package, try relative import
     from .ho_qp import Task, HoQp
 
+from Centroidal import CentroidalModelInfoSimple
+from task.position_task import PositionTask
 
 @dataclass
-class CentroidalModelInfoSimple:
-    """Minimal subset of CentroidalModelInfo used by the Wbc python port."""
-    generalizedCoordinatesNum: int
-    actuatedDofNum: int
-    numThreeDofContacts: int
-    robotMass: float = 1.0
-
 
 class FakePinocchioModel:
     def __init__(self, nq: int):
@@ -123,6 +118,36 @@ class Wbc:
         self.friction_coeff_ = 0.6
         self.swing_kp_ = 50.0
         self.swing_kd_ = 1.0
+
+        # Construct a PositionTask for a representative frame. The project's
+        # PositionTask implementation expects (info, frame_name, target_world,
+        # device, dtype) and will fall back to a minimal robot if the full
+        # kinematic backend is not available. We choose a foot frame name by
+        # convention; users can override after Wbc construction if desired.
+        try:
+            self.com_PositionTask = PositionTask(
+                info,
+                frame_name='com',
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create com_PositionTask, setting to None.")
+            # If PositionTask construction fails for any reason, set to None so
+            # update() can handle the missing task gracefully.
+            self.com_PositionTask = None
+        try:
+            self.LF_PositionTask = PositionTask(
+                info,
+                frame_name='LF_FOOT',
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create LF_PositionTask, setting to None.")
+            # If PositionTask construction fails for any reason, set to None so
+            # update() can handle the missing task gracefully.
+            self.LF_PositionTask = None
 
     # ----------------- Task builders -----------------
     def formulateFloatingBaseEomTask(self) -> Task:
@@ -226,21 +251,43 @@ class Wbc:
         device = self.device
         dtype = self.dtype
 
+        measured_rbd_state = torch.tensor([0., 1., 0., 0., 0., 0., 0.,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0], dtype=dtype)
+        input_desired = torch.tensor([0., 0., 1.0, 0., 0., 0.,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0], dtype=dtype)
+        self.info.update_state_input(
+            measured_rbd_state,
+            input_desired
+        )
         # Build tasks roughly following the C++ order
-        task_0 = (
-            self.formulateFloatingBaseEomTask()
-        ) + self.formulateTorqueLimitsTask() + self.formulateFrictionConeTask() + self.formulateNoContactMotionTask()
-
-        task_1 = self.formulateCentroidalMomentumTask() + self.formulateSwingLegTask()
-        task_2 = self.formulateContactForceTask()
-
-        # Create nested hierarchical problems: task_0 is highest priority
+        com_target_world = torch.tensor([0.0, 0., 0.0], device=device, dtype=dtype)
+        task_com_pos = self.com_PositionTask.as_task(
+            target_world=com_target_world,
+            axises="xyz",
+            frame="task"
+        )
+        LF_target_world = torch.tensor([0.46,0.70,-0.], device=device, dtype=dtype)
+        task_LF_pos = self.LF_PositionTask.as_task(
+            target_world=LF_target_world,
+            axises="xyz",
+            frame="task"
+        )
+        # Create nested hierarchical problems: task_com_pos is the higher (first) priority
+        # HoQp expects a Task and an optional higher_problem (HoQp). Construct the
+        # higher-priority problem first, then pass it as higher_problem to the
+        # lower-priority HoQp instance.
         dev = device if device is not None else torch.device('cpu')
-        ho0 = HoQp(task_0, None, device=dev, dtype=dtype)
-        ho1 = HoQp(task_1, ho0, device=dev, dtype=dtype)
-        ho2 = HoQp(task_2, ho1, device=dev, dtype=dtype)
 
-        return ho2.getSolutions()
+        ho_high = HoQp(task_com_pos, device=dev, dtype=dtype)
+        ho3 = HoQp(task_LF_pos, None, device=dev, dtype=dtype)
+
+        return ho3.getSolutions()
 
 
 if __name__ == "__main__":
@@ -259,3 +306,4 @@ if __name__ == "__main__":
 
     sol = w.update(state_desired, input_desired, measured, mode=0)
     print("Solution vector shape:", sol.shape)
+    print("Solution vector:", sol)

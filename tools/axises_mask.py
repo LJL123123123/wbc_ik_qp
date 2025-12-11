@@ -89,23 +89,47 @@ class AxisesMask:
         will be the selected rows after optionally rotating M into the chosen
         reference frame.
         """
+        # accept many reasonable torch shapes: 1-D length 3, 1-D flattened len=3*n,
+        # 2-D with shape (3,n), (6,n) (take top3), (1,3*n) (reshape), (3*n,1) (reshape),
+        # or (n,3) (transpose)
         if not isinstance(M, torch.Tensor):
             M = torch.as_tensor(M, device=self.device, dtype=self.dtype)
         else:
             M = M.to(device=self.device, dtype=self.dtype)
 
-        # ensure 2D: (3, n)
         was_1d = False
-        if M.ndim == 1:
-            if M.shape[0] != 3:
-                raise ValueError("1-D input must have length 3")
-            M = M.unsqueeze(1)  # (3,1)
-            was_1d = True
+        # normalize to shape (3, n)
+        if M.ndim == 0:
+            raise ValueError("Scalar is not a valid input for AxisesMask.apply")
+        elif M.ndim == 1:
+            if M.shape[0] == 3:
+                M = M.unsqueeze(1)
+                was_1d = True
+            elif M.shape[0] % 3 == 0:
+                M = M.view(3, -1)
+            else:
+                raise ValueError("1-D input length must be 3 or a multiple of 3")
         elif M.ndim == 2:
-            if M.shape[0] != 3:
-                raise ValueError("Input matrix must have 3 rows (shape (3,n))")
+            r, c = M.shape
+            # already (3, n)
+            if r == 3:
+                pass
+            # sometimes the jacobian comes as 6 x n -> take position rows (top 3)
+            elif r == 6:
+                M = M[0:3, :]
+            # flattened row (1, 3*n)
+            elif r == 1 and c % 3 == 0:
+                M = M.view(3, -1)
+            # flattened column (3*n, 1)
+            elif c == 1 and r % 3 == 0:
+                M = M.view(3, -1)
+            # transposed (n,3) -> convert to (3,n)
+            elif c == 3 and r % 3 == 0:
+                M = M.transpose(0, 1)
+            else:
+                raise ValueError("Input must be shape (3,n), (6,n), (1,3*n), (3*n,1) or (n,3)")
         else:
-            raise ValueError("Input must be 1-D (3,) or 2-D (3,n)")
+            raise ValueError("Input must be 1-D or 2-D tensor")
 
         # choose rotation based on frame
         if self.frame == AxisesMask.CUSTOM_FRAME:
@@ -123,7 +147,7 @@ class AxisesMask:
             out = M_rot[self.indices, :]
 
         if was_1d:
-            # return 1-D vector if input was 1-D and only one row selected -> scalar? keep 1-D
+            # if original input was length-3, return 1D vector; otherwise keep (3,) -> squeeze
             if out.shape[1] == 1:
                 return out.squeeze(1)
             else:

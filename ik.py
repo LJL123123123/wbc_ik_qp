@@ -1,32 +1,32 @@
+import os
+import numpy as np
 import torch
 from src import *
 from casadi import *
 from cusadi import *
+from dataclasses import dataclass
+from typing import Optional, Sequence
+from Centroidal import CentroidalModelInfoSimple
 
-@dataclass
-class CentroidalModelInfoSimple:
-    """Minimal subset of CentroidalModelInfo used by the Wbc python port."""
-    generalizedCoordinatesNum: int
-    actuatedDofNum: int
-    numThreeDofContacts: int
-    robotMass: float = 1.0
 
-class Model_cusadi:
+class Model_Cusadi:
     """A tiny fake Pinocchio interface exposing the minimal model/data used
     by the simplified Wbc implementation."""
 
-    def __init__(self, info: CentroidalModelInfoSimple, device=None, dtype=torch.float64):
+    def __init__(self, info: CentroidalModelInfoSimple, device=None, dtype=torch.float64,BATCH_SIZE=1):
         self.info = info
         self.device = device if device is not None else torch.device('cpu')
         self.dtype = dtype
-        self._model = FakePinocchioModel(info.generalizedCoordinatesNum)
-        self._data.nv = info.generalizedCoordinatesNum
-        self._data.nu = info.actuatedDofNum
-        self._data.state = torch.zeros(self._data.nv, device=self.device, dtype=self.dtype)
-        self._data.input = torch.zeros(self._data.nu, device=self.device, dtype=self.dtype)
-
+        
         #CoM_cusadi
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_position.casadi"))
+        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_position.casadi"))
+        self.CoM_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_attitude.casadi"))
+        self.CoM_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_jacobian.casadi"))
+        self.CoM_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_velocity.casadi"))
+        self.CoM_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
 
         # Foot_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_position.casadi"))
@@ -66,7 +66,13 @@ class Model_cusadi:
         self.RF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
 
     def getPosition(self, x0, u0, __name__):
-        if __name__ == "LF_FOOT":
+        # support center-of-mass query
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_position_cusadi', None) is None:
+                raise RuntimeError("CoM position cusadi function not available")
+            self.CoM_position_cusadi.evaluate((x0, u0))
+            position = self.CoM_position_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
             self.LF_FOOT_position_cusadi.evaluate((x0, u0))
             position = self.LF_FOOT_position_cusadi.getDenseOutput(0)
         elif __name__ == "LH_FOOT":
@@ -78,10 +84,23 @@ class Model_cusadi:
         elif __name__ == "RF_FOOT":
             self.RF_FOOT_position_cusadi.evaluate((x0, u0))
             position = self.RF_FOOT_position_cusadi.getDenseOutput(0)
-        return position
+        else:
+            raise ValueError(f"Unknown frame name for getPosition: {__name__}")
+
+        # convert to torch tensor on the model device/dtype
+        try:
+            arr = np.asarray(position)
+        except Exception:
+            arr = position
+        return torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,)
 
     def getAttitude(self, x0, u0, __name__):
-        if __name__ == "LF_FOOT":
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_attitude_cusadi', None) is None:
+                raise RuntimeError("CoM attitude cusadi function not available")
+            self.CoM_attitude_cusadi.evaluate((x0, u0))
+            attitude = self.CoM_attitude_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
             self.LF_FOOT_attitude_cusadi.evaluate((x0, u0))
             attitude = self.LF_FOOT_attitude_cusadi.getDenseOutput(0)
         elif __name__ == "LH_FOOT":
@@ -93,10 +112,22 @@ class Model_cusadi:
         elif __name__ == "RF_FOOT":
             self.RF_FOOT_attitude_cusadi.evaluate((x0, u0))
             attitude = self.RF_FOOT_attitude_cusadi.getDenseOutput(0)
-        return attitude
+        else:
+            raise ValueError(f"Unknown frame name for getAttitude: {__name__}")
+
+        try:
+            arr = np.asarray(attitude)
+        except Exception:
+            arr = attitude
+        return torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,3)
 
     def getJacobian(self, x0, u0, __name__):
-        if __name__ == "LF_FOOT":
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_jacobian_cusadi', None) is None:
+                raise RuntimeError("CoM jacobian cusadi function not available")
+            self.CoM_jacobian_cusadi.evaluate((x0, u0))
+            jacobian = self.CoM_jacobian_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
             self.LF_FOOT_jacobian_cusadi.evaluate((x0, u0))
             jacobian = self.LF_FOOT_jacobian_cusadi.getDenseOutput(0)
         elif __name__ == "LH_FOOT":
@@ -108,10 +139,18 @@ class Model_cusadi:
         elif __name__ == "RF_FOOT":
             self.RF_FOOT_jacobian_cusadi.evaluate((x0, u0))
             jacobian = self.RF_FOOT_jacobian_cusadi.getDenseOutput(0)
+        else:
+            raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
+
         return jacobian
 
     def getVelocity(self, x0, u0, __name__):
-        if __name__ == "LF_FOOT":
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_velocity_cusadi', None) is None:
+                raise RuntimeError("CoM velocity cusadi function not available")
+            self.CoM_velocity_cusadi.evaluate((x0, u0))
+            velocity = self.CoM_velocity_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
             self.LF_FOOT_velocity_cusadi.evaluate((x0, u0))
             velocity = self.LF_FOOT_velocity_cusadi.getDenseOutput(0)
         elif __name__ == "LH_FOOT":
@@ -123,13 +162,20 @@ class Model_cusadi:
         elif __name__ == "RF_FOOT":
             self.RF_FOOT_velocity_cusadi.evaluate((x0, u0))
             velocity = self.RF_FOOT_velocity_cusadi.getDenseOutput(0)
-        return velocity
+        else:
+            raise ValueError(f"Unknown frame name for getVelocity: {__name__}")
+
+        try:
+            arr = np.asarray(velocity)
+        except Exception:
+            arr = velocity
+        return torch.as_tensor(arr, device=self.device, dtype=self.dtype)
 
     def getModel(self):
-        return self._model
+        return None
 
     def getData(self):
-        return self._data
+        return None
 
     # The real Pinocchio api runs kinematics and updates internal data.
     # Here we provide no-op implementations (placeholders) to keep the API.
@@ -155,8 +201,27 @@ if __name__ == "__main__":
                                    actuatedDofNum=18,
                                    numThreeDofContacts=4,
                                    robotMass=30.0)
-    model = Model_cusadi(info, device='cuda', dtype=torch.double)
+    model = Model_Cusadi(info, device='cuda', dtype=torch.double)
     print(f"  - generalizedCoordinatesNum: {model.info.generalizedCoordinatesNum}")
     print(f"  - actuatedDofNum: {model.info.actuatedDofNum}")
     print(f"  - numThreeDofContacts: {model.info.numThreeDofContacts}")
     print(f"  - robotMass: {model.info.robotMass}") 
+    x0 = torch.zeros((19,), dtype=torch.double, device='cuda')
+    u0 = torch.zeros((18,), dtype=torch.double, device='cuda')
+    # pos = model.getPosition(x0, u0, 'com')
+    # print("CoM position:", pos)
+    # att = model.getAttitude(x0, u0, 'com')
+    # print("CoM attitude:", att)
+    # jac = model.getJacobian(x0, u0, 'com')
+    # print("CoM jacobian:", jac)
+    # vel = model.getVelocity(x0, u0, 'com')
+    # print("CoM velocity:", vel)
+    
+    # pos = model.getPosition(x0, u0, 'LF_FOOT')
+    # print("LF_FOOT position:", pos)
+    # att = model.getAttitude(x0, u0, 'LF_FOOT')
+    # print("LF_FOOT attitude:", att)
+    jac = model.getJacobian(x0, u0, 'LF_FOOT')
+    print("LF_FOOT jacobian:", jac)
+    # vel = model.getVelocity(x0, u0, 'LF_FOOT')
+    # print("LF_FOOT velocity:", vel)
