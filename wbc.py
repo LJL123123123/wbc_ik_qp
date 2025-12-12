@@ -251,12 +251,12 @@ class Wbc:
         device = self.device
         dtype = self.dtype
 
-        measured_rbd_state = torch.tensor([0., 1., 0., 0., 0., 0., 0.,
+        measured_rbd_state = torch.tensor([0., 0., 0., 0., 0., 0., 0.,
                                             0., 0., 0.0,
                                             0., 0., 0.0,
                                             0., 0., 0.0,
                                             0., 0., 0.0], dtype=dtype)
-        input_desired = torch.tensor([0., 0., 1.0, 0., 0., 0.,
+        input_desired = torch.tensor([0., 0., 0.0, 0., 0., 0.,
                                             0., 0., 0.0,
                                             0., 0., 0.0,
                                             0., 0., 0.0,
@@ -272,7 +272,7 @@ class Wbc:
             axises="xyz",
             frame="task"
         )
-        LF_target_world = torch.tensor([0.46,0.70,-0.], device=device, dtype=dtype)
+        LF_target_world = torch.tensor([0.1,0.5,-0.1], device=device, dtype=dtype)
         task_LF_pos = self.LF_PositionTask.as_task(
             target_world=LF_target_world,
             axises="xyz",
@@ -286,8 +286,8 @@ class Wbc:
 
         ho_high = HoQp(task_com_pos, device=dev, dtype=dtype)
         ho3 = HoQp(task_LF_pos, None, device=dev, dtype=dtype)
-
-        return ho3.getSolutions()
+        combined_ho = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype)
+        return combined_ho.getSolutions()
 
 
 if __name__ == "__main__":
