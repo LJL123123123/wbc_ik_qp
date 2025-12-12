@@ -81,7 +81,7 @@ class PositionTask:
                 self.mask = AxisesMask(device=self.device, dtype=self.dtype)
 
         def as_task(self, target_world: Sequence[float],
-                                axises: str = "xyz", frame: Optional[str] = "task") -> Task:
+                                axises: str = "xyz", frame: Optional[str] = "task", weight: float = 1.0) -> Task:
                 """Return a `ho_qp.Task` built from this PositionTask.
 
                 Args:
@@ -139,7 +139,7 @@ class PositionTask:
 
                 # Ensure shapes: A_masked should be (m, n) and b_masked (m,)
                 # ho_qp.Task handles empty tensors; just construct and return.
-                return Task(a=A_masked, b=b_masked, device=self.device, dtype=self.dtype)
+                return Task(a=A_masked, b=b_masked, device=self.device, dtype=self.dtype, weight=weight)
 
         def type_name(self):
                 return "position"

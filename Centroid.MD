@@ -10,24 +10,4 @@ state after info: tensor([0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.
 将Centroidal.py的矩阵/向量储存&输出变成GPU tensor 。
 测试position_task.py中的pos，att, J, A_masked, b_masked都为device='cuda:0'。
 
- # Q2
- Traceback (most recent call last):
-File "/home/ReLUQP-py/wbc_ik_qp/wbc.py", line 307, in <module>
-sol = w.update(state_desired, input_desired, measured, mode=0)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "/home/ReLUQP-py/wbc_ik_qp/wbc.py", line 288, in update
-ho3 = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "/home/ReLUQP-py/wbc_ik_qp/ho_qp.py", line 106, in init
-self.formulate_problem()
-File "/home/ReLUQP-py/wbc_ik_qp/ho_qp.py", line 160, in formulate_problem
-self.build_h_matrix()
-File "/home/ReLUQP-py/wbc_ik_qp/ho_qp.py", line 173, in build_h_matrix
-a_curr_z_prev = self.task_.a_ @ self.stacked_z_prev_
-~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~
-RuntimeError: mat1 and mat2 shapes cannot be multiplied (3x18 and 19x19)
-root@zenbot-ljl-System-Product-Name:/home/ReLUQP-py#
-
-Centroidal的内容和ik的内容默认是对的,这里应该是18维才对,请帮我纠正
-HoQP维度不对
 

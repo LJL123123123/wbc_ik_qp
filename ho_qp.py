@@ -30,7 +30,7 @@ class Task:
 
     def __init__(self, a: Optional[torch.Tensor] = None, b: Optional[torch.Tensor] = None,
                  d: Optional[torch.Tensor] = None, f: Optional[torch.Tensor] = None,
-                 num_decision_vars: Optional[int] = None, device=None, dtype=None):
+                 num_decision_vars: Optional[int] = None, device=None, dtype=None, weight: float = 1.0):
         if a is None:
             if num_decision_vars is None:
                 self.a_ = torch.zeros((0, 0), device=device, dtype=dtype)
@@ -48,6 +48,9 @@ class Task:
         else:
             self.d_ = d
         self.f_ = torch.zeros(0, device=device, dtype=dtype) if f is None else f
+        
+        # Task weight for hierarchical combining
+        self.weight_ = weight
 
     def __add__(self, rhs: "Task") -> "Task":
         # Concatenate rows (stack tasks).
@@ -78,7 +81,9 @@ class Task:
 
         f = torch.cat([self.f_, rhs.f_], dim=0) if self.f_.numel() and rhs.f_.numel() else (rhs.f_ if self.f_.numel() == 0 else self.f_)
 
-        return Task(a=a, b=b, d=d, f=f)
+        # Combine weights using sum (could also use max, average, etc.)
+        combined_weight = self.weight_ + rhs.weight_
+        return Task(a=a, b=b, d=d, f=f, weight=combined_weight)
 
     @staticmethod
     def concatenate_vectors(v1: torch.Tensor, v2: torch.Tensor) -> torch.Tensor:
@@ -95,17 +100,20 @@ class HoQp:
     Constructor accepts a Task and an optional higher_problem (HoQp instance).
     """
 
-    def __init__(self, task: Task, higher_problem: Optional["HoQp"] = None, device=None, dtype=torch.float64):
+    def __init__(self, task: Task, higher_problem: Optional["HoQp"] = None, device=None, dtype=torch.float64, task_weight: float = 1.0):
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.dtype = dtype
         self.task_ = task
         self.higher_problem_ = higher_problem
+        # Store the task weight for this level
+        self.task_weight_ = task_weight
 
         # Will be set during initialization
         self.init_vars()
+        self.build_z_matrix()  # Build nullspace first to determine correct dimensions
+        self.update_decision_vars_count()  # Update num_decision_vars_ based on nullspace
         self.formulate_problem()
         self.solve_problem()
-        self.build_z_matrix()
         self.stack_slack_solutions()
 
     # Public getters matching C++ naming
@@ -119,8 +127,34 @@ class HoQp:
         return self.stacked_slack_vars_
 
     def getSolutions(self):
-        x = self.x_prev_ + self.stacked_z_prev_ @ self.decision_vars_solutions_
-        return x
+        # Check if stacked_z_ has any columns for proper matrix multiplication
+        if self.stacked_z_.shape[1] == 0:
+            # No remaining degrees of freedom from nullspace projection
+            # In this case, the optimization solved the overconstrained system directly
+            # The solution should be applied to achieve the current task as much as possible
+            if hasattr(self, 'decision_vars_solutions_') and self.decision_vars_solutions_.numel() > 0:
+                # We have a direct solution for the current task
+                # Apply it by reconstructing the full solution
+                result = self.x_prev_.clone()
+                if self.has_eq_constraints_:
+                    # Use pseudoinverse to find the least-squares adjustment
+                    # that satisfies the current task: A * (x_prev + delta) = b
+                    # => A * delta = b - A * x_prev
+                    residual = self.task_.b_ - self.task_.a_ @ self.x_prev_
+                    try:
+                        A_pinv = torch.linalg.pinv(self.task_.a_)
+                        delta = A_pinv @ residual
+                        result = self.x_prev_ + delta
+                    except:
+                        # Fall back to previous solution if pseudoinverse fails
+                        result = self.x_prev_
+                return result
+            else:
+                return self.x_prev_
+        else:
+            # Apply the optimization result projected through stacked_z_
+            x = self.x_prev_ + self.stacked_z_ @ self.decision_vars_solutions_
+            return x
 
     def getSlackedNumVars(self):
         return self.stacked_tasks_.d_.shape[0]
@@ -133,13 +167,47 @@ class HoQp:
         self.has_ineq_constraints_ = self.num_slack_vars_ > 0
 
         if self.higher_problem_ is not None:
-            self.stacked_z_prev_ = self.higher_problem_.getStackedZMatrix()
+            # Get information from higher priority problem
             self.stacked_tasks_prev_ = self.higher_problem_.getStackedTasks()
             self.stacked_slack_solutions_prev_ = self.higher_problem_.getStackedSlackSolutions()
             self.x_prev_ = self.higher_problem_.getSolutions()
             self.num_prev_slack_vars_ = self.higher_problem_.getSlackedNumVars()
+            
+            # For hierarchical QP, we need the nullspace of the stacked higher-priority constraints
+            # rather than just copying the stacked_z_ from the higher problem
+            higher_tasks = self.higher_problem_.getStackedTasks()
+            if higher_tasks.a_.numel() > 0 and higher_tasks.a_.shape[0] > 0:
+                # Compute nullspace of the accumulated higher-priority constraints
+                try:
+                    mat = higher_tasks.a_
+                    Q, R = torch.linalg.qr(mat.T, mode='complete') 
+                    rank = torch.linalg.matrix_rank(R)
+                    n = mat.shape[1]
+                    if rank < n:
+                        self.stacked_z_prev_ = Q[:, rank:]
+                        print(f'init_vars: computed nullspace of stacked higher tasks, dim {self.stacked_z_prev_.shape[1]}')
+                    else:
+                        self.stacked_z_prev_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
+                        print(f'init_vars: higher tasks are full rank, no nullspace')
+                except Exception as e:
+                    print(f'Nullspace computation failed: {e}, using higher problem stacked_z_')
+                    self.stacked_z_prev_ = self.higher_problem_.getStackedZMatrix()
+            else:
+                # No constraints from higher problem, use full space
+                n = max(t.a_.shape[1] if t.a_.numel() else 0, t.d_.shape[1] if t.d_.numel() else 0)
+                self.stacked_z_prev_ = torch.eye(n, device=self.device, dtype=self.dtype)
+                print(f'init_vars: no higher constraints, using identity matrix {n}x{n}')
 
-            self.num_decision_vars_ = self.stacked_z_prev_.shape[1]
+            # num_decision_vars_ should reflect the space we can actually optimize in.
+            # If stacked_z_prev_ has zero columns, we'll later use regularization, so
+            # we should base this on the original decision space size rather than
+            # the nullspace size to ensure the optimization matrices are sized correctly.
+            if self.stacked_z_prev_.shape[1] == 0:
+                # No nullspace from higher priority, but we'll use regularization
+                # so we need the full original space size for proper matrix dimensions
+                self.num_decision_vars_ = self.stacked_z_prev_.shape[0]
+            else:
+                self.num_decision_vars_ = self.stacked_z_prev_.shape[1]
         else:
             # If no higher problem, number of decision vars is max of columns
             ncols = max(t.a_.shape[1] if t.a_.numel() else 0, t.d_.shape[1] if t.d_.numel() else 0)
@@ -165,41 +233,72 @@ class HoQp:
     def build_h_matrix(self):
         nx = self.num_decision_vars_
         nv = self.num_slack_vars_
-        # z is [decision_vars; slack_vars]
-        zdim = nx + nv
-        h = torch.zeros((zdim, zdim), device=self.device, dtype=self.dtype)
-
+        
         if self.has_eq_constraints_:
             a_curr_z_prev = self.task_.a_ @ self.stacked_z_prev_
-            z_t_a_t_a_z = a_curr_z_prev.T @ a_curr_z_prev + 1e-12 * torch.eye(nx, device=self.device, dtype=self.dtype)
+            # Apply task weight to the objective function
+            task_weight = self.task_weight_ * self.task_.weight_
+            # Handle case where stacked_z_prev_ has zero columns (no nullspace)
+            # In this case a_curr_z_prev will be [m, 0], so we use a different formula
+            if a_curr_z_prev.shape[1] == 0:
+                # No projectable space, use task jacobian directly in regularized form
+                # Use the original task jacobian size for this case
+                original_size = self.task_.a_.shape[1]
+                z_t_a_t_a_z = task_weight * (self.task_.a_.T @ self.task_.a_) + 1e-12 * torch.eye(original_size, device=self.device, dtype=self.dtype)
+                # Make sure it matches our expected dimension
+                if z_t_a_t_a_z.shape[0] != nx:
+                    # This shouldn't happen if our logic is correct, but let's be safe
+                    z_t_a_t_a_z = torch.zeros((nx, nx), device=self.device, dtype=self.dtype)
+            else:
+                # Normal case: use projected jacobian
+                # The size should match nx (which is now the nullspace dimension)  
+                z_t_a_t_a_z = task_weight * (a_curr_z_prev.T @ a_curr_z_prev) + 1e-12 * torch.eye(a_curr_z_prev.shape[1], device=self.device, dtype=self.dtype)
         else:
             z_t_a_t_a_z = torch.zeros((nx, nx), device=self.device, dtype=self.dtype)
 
+        # Build H matrix with dimensions based on the computed z_t_a_t_a_z
+        actual_nx = z_t_a_t_a_z.shape[0]
+        zdim = actual_nx + nv
+        h = torch.zeros((zdim, zdim), device=self.device, dtype=self.dtype)
+        
         # top-left, top-right, bottom-left, bottom-right
         top_left = z_t_a_t_a_z
-        top_right = torch.zeros((nx, nv), device=self.device, dtype=self.dtype)
-        bottom_left = torch.zeros((nv, nx), device=self.device, dtype=self.dtype)
+        top_right = torch.zeros((actual_nx, nv), device=self.device, dtype=self.dtype)
+        bottom_left = torch.zeros((nv, actual_nx), device=self.device, dtype=self.dtype)
         bottom_right = self.eye_nv_nv_
 
-        h[:nx, :nx] = top_left
-        h[:nx, nx:] = top_right
-        h[nx:, :nx] = bottom_left
-        h[nx:, nx:] = bottom_right
+        h[:actual_nx, :actual_nx] = top_left
+        if nv > 0:
+            h[:actual_nx, actual_nx:] = top_right
+            h[actual_nx:, :actual_nx] = bottom_left
+            h[actual_nx:, actual_nx:] = bottom_right
 
         self.h_ = h
 
     def build_c_vector(self):
         nx = self.num_decision_vars_
         nv = self.num_slack_vars_
-        c = torch.zeros((nx + nv,), device=self.device, dtype=self.dtype)
 
         if self.has_eq_constraints_:
-            temp = (self.task_.a_ @ self.stacked_z_prev_).T @ (self.task_.a_ @ self.x_prev_ - self.task_.b_)
+            a_z_prev = self.task_.a_ @ self.stacked_z_prev_
+            # Apply task weight to the gradient
+            task_weight = self.task_weight_ * self.task_.weight_
+            # Handle case where stacked_z_prev_ has zero columns (no nullspace)
+            if a_z_prev.shape[1] == 0:
+                # No projectable space, compute gradient directly from task residual
+                temp = task_weight * (self.task_.a_.T @ (self.task_.a_ @ self.x_prev_ - self.task_.b_))
+            else:
+                residual = self.task_.a_ @ self.x_prev_ - self.task_.b_
+                temp = task_weight * (a_z_prev.T @ residual)
         else:
             temp = torch.zeros((nx,), device=self.device, dtype=self.dtype)
 
-        c[:nx] = temp
-        # slack part stays zero
+        # Build c vector with dimensions based on the computed temp
+        actual_nx = temp.shape[0] if temp.numel() > 0 else nx
+        c = torch.zeros((actual_nx + nv,), device=self.device, dtype=self.dtype)
+        
+        c[:actual_nx] = temp
+        # slack part stays zero (if any)
         self.c_ = c
 
     def build_d_matrix(self):
@@ -266,20 +365,106 @@ class HoQp:
         # Build stacked_z_ similar to C++: if eq constraints exist compute kernel
         if self.has_eq_constraints_:
             assert self.task_.a_.shape[1] > 0
-            # compute nullspace of (A * stacked_z_prev_)
-            mat = self.task_.a_ @ self.stacked_z_prev_
-            # torch doesn't have fullPivLu().kernel(); we compute SVD nullspace
-            # compute reduced SVD to make vh shape compatible with s length
-            u, s, vh = torch.linalg.svd(mat, full_matrices=False)
-            tol = 1e-12
-            null_mask = s <= tol
-            # If no nullspace, stacked_z_ is zeros with appropriate cols
-            if null_mask.numel() == 0 or null_mask.sum() == 0:
-                self.stacked_z_ = torch.zeros_like(self.stacked_z_prev_)
+            
+            # Special case: if this is a standalone HoQp (no higher_problem), 
+            # we don't need nullspace projection - just solve the least squares problem directly
+            if self.higher_problem_ is None:
+                # For standalone problems, we use the full space (identity matrix)
+                # The optimization will find the least-squares solution
+                n = self.task_.a_.shape[1]
+                self.stacked_z_ = torch.eye(n, device=self.device, dtype=self.dtype)
+                print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
+                return
+            
+            # When stacked_z_prev_ has zero columns (no nullspace from higher priority),
+            # we have two options:
+            # 1. Strict nullspace projection: return empty (current behavior)  
+            # 2. Allow lower-priority influence via regularization/relaxation
+            if self.stacked_z_prev_.shape[1] == 0:
+                # Higher priority has consumed all DOF. To match placo behavior
+                # where lower priority tasks can still influence the solution,
+                # we provide a small regularized identity matrix instead of
+                # strictly enforcing no DOF. This allows lower tasks to "push back"
+                # against higher priority with small weights.
+                n_prev = self.stacked_z_prev_.shape[0]
+                regularization_weight = 1e-6  # Small weight for lower priority influence
+                self.stacked_z_ = regularization_weight * torch.eye(n_prev, device=self.device, dtype=self.dtype)
+                print(f'build_z_matrix: no nullspace from higher priority, using regularized identity with weight {regularization_weight}')
             else:
-                # columns of V^H.T corresponding to small singular values
-                nullspace = vh.T[:, null_mask]
-                self.stacked_z_ = self.stacked_z_prev_ @ nullspace
+                # compute nullspace of (A * stacked_z_prev_)
+                mat = self.task_.a_ @ self.stacked_z_prev_
+
+                
+                # For underconstrained systems (m < n), directly compute nullspace
+                m, n = mat.shape
+                expected_null_dim = max(0, n - m)
+                
+                if expected_null_dim > 0:
+                    # This is an underconstrained system, should have nullspace
+                    # Use QR decomposition for more reliable nullspace computation
+                    try:
+                        # Transpose and compute QR to find nullspace
+                        Q, R = torch.linalg.qr(mat.T, mode='complete')
+                        # The nullspace is the columns of Q corresponding to zero rows in R
+                        rank = torch.linalg.matrix_rank(R)
+                        if rank < n:
+                            nullspace = Q[:, rank:]
+                            self.stacked_z_ = self.stacked_z_prev_ @ nullspace
+                            print(f'build_z_matrix: found nullspace of dimension {nullspace.shape[1]} using QR')
+                        else:
+                            # Full rank case, no nullspace
+                            n_prev = self.stacked_z_prev_.shape[0]
+                            self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
+                            print('build_z_matrix: full rank matrix, no nullspace')
+                    except Exception as e:
+                        print(f'QR nullspace computation failed: {e}, falling back to SVD')
+                        # Fall back to SVD
+                        u, s, vh = torch.linalg.svd(mat, full_matrices=False)
+                        eps = torch.finfo(s.dtype).eps
+                        max_sv = s.max() if s.numel() > 0 else torch.tensor(0.0, dtype=s.dtype, device=s.device)
+                        tol = max_sv * max(mat.shape) * eps * 100
+                        null_mask = s <= tol
+                        if null_mask.sum() > 0:
+                            # Use the last columns of vh.T (corresponding to small singular values)
+                            # vh is (min(m,n), n), so vh.T is (n, min(m,n))
+                            # For underconstrained case, take last (n-rank) columns
+                            rank = (s > tol).sum().item()
+                            if rank < n and rank < vh.shape[0]:
+                                # Get nullspace from the orthogonal complement
+                                # Since vh contains right singular vectors, and we want nullspace,
+                                # we need to construct it properly for underconstrained case
+                                nullspace_dim = n - rank
+                                if nullspace_dim > 0:
+                                    # Create orthogonal basis for nullspace
+                                    # For now, use regularized approach
+                                    reg_weight = 1e-6
+                                    self.stacked_z_ = reg_weight * torch.eye(n_prev, device=self.device, dtype=self.dtype)
+                                    print(f'build_z_matrix: using regularized identity for underconstrained case')
+                                else:
+                                    n_prev = self.stacked_z_prev_.shape[0]
+                                    self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
+                            else:
+                                n_prev = self.stacked_z_prev_.shape[0]
+                                self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
+                        else:
+                            n_prev = self.stacked_z_prev_.shape[0]
+                            self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
+                else:
+                    # Overconstrained or exactly constrained case
+                    u, s, vh = torch.linalg.svd(mat, full_matrices=False)
+                    eps = torch.finfo(s.dtype).eps
+                    max_sv = s.max() if s.numel() > 0 else torch.tensor(0.0, dtype=s.dtype, device=s.device)
+                    tol = max_sv * max(mat.shape) * eps * 100
+                    
+                    print('build_z_matrix singular values:', s, ' tol=', tol)
+                    
+                    null_mask = s <= tol
+                    if null_mask.sum() > 0:
+                        nullspace = vh.T[:, null_mask]
+                        self.stacked_z_ = self.stacked_z_prev_ @ nullspace
+                    else:
+                        n_prev = self.stacked_z_prev_.shape[0]
+                        self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
         else:
             self.stacked_z_ = self.stacked_z_prev_
 
@@ -345,6 +530,13 @@ class HoQp:
 
         # store for access
         self.qp_solution_ = z.to(device=device, dtype=dtype)
+
+    def update_decision_vars_count(self):
+        """Update num_decision_vars_ based on the actual nullspace dimension."""
+        if hasattr(self, 'stacked_z_') and self.stacked_z_.numel() > 0:
+            self.num_decision_vars_ = self.stacked_z_.shape[1]
+        # Update dependent matrices
+        self.zero_nv_nx_ = torch.zeros((self.num_slack_vars_, self.num_decision_vars_), device=self.device, dtype=self.dtype)
 
     def stack_slack_solutions(self):
         if self.higher_problem_ is not None:

@@ -266,17 +266,23 @@ class Wbc:
             input_desired
         )
         # Build tasks roughly following the C++ order
+        # Define task weights - higher priority tasks get higher weights
+        com_weight = 100.0   # High priority for COM position
+        lf_weight = 1000.0   # Increased weight for foot position to see more effect
+        
         com_target_world = torch.tensor([0.0, 0., 0.0], device=device, dtype=dtype)
         task_com_pos = self.com_PositionTask.as_task(
             target_world=com_target_world,
             axises="xyz",
-            frame="task"
+            frame="task",
+            weight=com_weight
         )
         LF_target_world = torch.tensor([0.1,0.5,-0.1], device=device, dtype=dtype)
         task_LF_pos = self.LF_PositionTask.as_task(
             target_world=LF_target_world,
             axises="xyz",
-            frame="task"
+            frame="task",
+            weight=lf_weight
         )
         # Create nested hierarchical problems: task_com_pos is the higher (first) priority
         # HoQp expects a Task and an optional higher_problem (HoQp). Construct the
@@ -284,9 +290,54 @@ class Wbc:
         # lower-priority HoQp instance.
         dev = device if device is not None else torch.device('cpu')
 
-        ho_high = HoQp(task_com_pos, device=dev, dtype=dtype)
-        ho3 = HoQp(task_LF_pos, None, device=dev, dtype=dtype)
-        combined_ho = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype)
+        # Debug: show task shapes and some stats
+        print('task_com_pos.a_.shape =', task_com_pos.a_.shape, ' nonzero:', (task_com_pos.a_ != 0).sum().item())
+        print('task_LF_pos.a_.shape =', task_LF_pos.a_.shape, ' nonzero:', (task_LF_pos.a_ != 0).sum().item())
+        print('COM target error (b) =', task_com_pos.b_)
+        print('LF target error (b) =', task_LF_pos.b_)
+
+        # Define hierarchical weights for different priorities
+        high_priority_weight = 100.0   # High weight for high priority tasks
+        low_priority_weight = 100.0    # Increased weight for low priority tasks
+        
+        ho_high = HoQp(task_com_pos, None, device=dev, dtype=dtype, task_weight=high_priority_weight)
+        # Diagnostic prints for ho_high
+        print('\n--- ho_high diagnostic ---')
+        print('ho_high.num_decision_vars_ =', ho_high.num_decision_vars_)
+        print('ho_high.num_slack_vars_ =', ho_high.num_slack_vars_)
+        print('ho_high.has_eq_constraints_ =', ho_high.has_eq_constraints_)
+        print('ho_high.task_weight_ =', ho_high.task_weight_)
+        print('ho_high.task_.weight_ =', ho_high.task_.weight_)
+        print('ho_high.stacked_z_.shape =', ho_high.getStackedZMatrix().shape)
+        print('ho_high.h_.shape =', ho_high.h_.shape)
+        print('ho_high.c_.shape =', ho_high.c_.shape)
+        print('ho_high.getSolutions() =', ho_high.getSolutions())
+
+        ho3 = HoQp(task_LF_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- ho3 (LF standalone) diagnostic ---')
+        print('ho3.num_decision_vars_ =', ho3.num_decision_vars_)
+        print('ho3.task_weight_ =', ho3.task_weight_)
+        print('ho3.task_.weight_ =', ho3.task_.weight_)
+        print('ho3.stacked_z_.shape =', ho3.getStackedZMatrix().shape)
+        print('ho3.h_.shape =', ho3.h_.shape)
+        print('ho3.c_.shape =', ho3.c_.shape)
+        print('ho3.getSolutions() =', ho3.getSolutions())
+
+        combined_ho = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- combined_ho diagnostic ---')
+        print('combined.num_decision_vars_ =', combined_ho.num_decision_vars_)
+        print('combined.num_slack_vars_ =', combined_ho.num_slack_vars_)
+        print('combined.has_eq_constraints_ =', combined_ho.has_eq_constraints_)
+        print('combined.task_weight_ =', combined_ho.task_weight_)
+        print('combined.task_.weight_ =', combined_ho.task_.weight_)
+        print('combined.stacked_z_prev_.shape =', combined_ho.stacked_z_prev_.shape)
+        print('combined.getStackedZMatrix().shape =', combined_ho.getStackedZMatrix().shape)
+        print('combined.x_prev_.shape =', combined_ho.x_prev_.shape)
+        print('combined.h_.shape =', combined_ho.h_.shape)
+        print('combined.c_.shape =', combined_ho.c_.shape)
+        print('combined.d_.shape =', combined_ho.d_.shape)
+        print('combined.f_.shape =', combined_ho.f_.shape)
+        print('combined.getSolutions() =', combined_ho.getSolutions())
         return combined_ho.getSolutions()
 
 
