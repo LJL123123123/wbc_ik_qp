@@ -26,8 +26,12 @@ except Exception:
 
 from Centroidal import CentroidalModelInfoSimple
 from task.position_task import PositionTask
+from task.orientation_task import OrientationTask
 
 @dataclass
+class WbcTask:
+    position: PositionTask
+    orientation: OrientationTask
 
 class FakePinocchioModel:
     def __init__(self, nq: int):
@@ -133,8 +137,16 @@ class Wbc:
             )
         except Exception:
             print("Failed to create com_PositionTask, setting to None.")
-            # If PositionTask construction fails for any reason, set to None so
-            # update() can handle the missing task gracefully.
+            self.com_PositionTask = None
+        try:
+            self.com_OrientationTask = OrientationTask(
+                info,
+                frame_name='com',
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create com_PositionTask, setting to None.")
             self.com_PositionTask = None
         try:
             self.LF_PositionTask = PositionTask(
@@ -145,9 +157,17 @@ class Wbc:
             )
         except Exception:
             print("Failed to create LF_PositionTask, setting to None.")
-            # If PositionTask construction fails for any reason, set to None so
-            # update() can handle the missing task gracefully.
             self.LF_PositionTask = None
+        try:
+            self.RF_PositionTask = PositionTask(
+                info,
+                frame_name='RF_FOOT',
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create RF_PositionTask, setting to None.")
+            self.RF_PositionTask = None
 
     # ----------------- Task builders -----------------
     def formulateFloatingBaseEomTask(self) -> Task:
@@ -277,9 +297,23 @@ class Wbc:
             frame="task",
             weight=com_weight
         )
+        com_target_attitude = torch.tensor([0., 0., 0., 1.], device=device, dtype=dtype)
+        task_com_ori = self.com_OrientationTask.as_task(
+            target_attitude=com_target_attitude,
+            axises="xyz",
+            frame="task",
+            weight=com_weight
+        )
         LF_target_world = torch.tensor([0.1,0.5,-0.1], device=device, dtype=dtype)
         task_LF_pos = self.LF_PositionTask.as_task(
             target_world=LF_target_world,
+            axises="xyz",
+            frame="task",
+            weight=lf_weight
+        )
+        RF_target_world = torch.tensor([0.1,-0.5,-0.1], device=device, dtype=dtype)
+        task_RF_pos = self.RF_PositionTask.as_task(
+            target_world=RF_target_world,
             axises="xyz",
             frame="task",
             weight=lf_weight
@@ -300,7 +334,7 @@ class Wbc:
         high_priority_weight = 100.0   # High weight for high priority tasks
         low_priority_weight = 100.0    # Increased weight for low priority tasks
         
-        ho_high = HoQp(task_com_pos, None, device=dev, dtype=dtype, task_weight=high_priority_weight)
+        ho_high = HoQp(task_com_pos, task_com_ori, device=dev, dtype=dtype, task_weight=high_priority_weight)
         # Diagnostic prints for ho_high
         print('\n--- ho_high diagnostic ---')
         print('ho_high.num_decision_vars_ =', ho_high.num_decision_vars_)
@@ -322,6 +356,16 @@ class Wbc:
         print('ho3.h_.shape =', ho3.h_.shape)
         print('ho3.c_.shape =', ho3.c_.shape)
         print('ho3.getSolutions() =', ho3.getSolutions())
+
+        ho2 = HoQp(task_RF_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- ho2 (RF standalone) diagnostic ---')
+        print('ho2.num_decision_vars_ =', ho2.num_decision_vars_)
+        print('ho2.task_weight_ =', ho2.task_weight_)
+        print('ho2.task_.weight_ =', ho2.task_.weight_)
+        print('ho2.stacked_z_.shape =', ho2.getStackedZMatrix().shape)
+        print('ho2.h_.shape =', ho2.h_.shape)
+        print('ho2.c_.shape =', ho2.c_.shape)
+        print('ho2.getSolutions() =', ho2.getSolutions())
 
         combined_ho = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
         print('\n--- combined_ho diagnostic ---')
