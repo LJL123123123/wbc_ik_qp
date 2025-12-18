@@ -99,8 +99,8 @@ class PositionTask:
                 # get current frame position, attitude and jacobian from Model_Cusadi
                 pos = self.robot.getPosition(self.info.getstate(), self.info.getinput(), self.frame_name)
                 att = self.robot.getAttitude(self.info.getstate(), self.info.getinput(), self.frame_name)
-                J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name)
-                
+                J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name) 
+                print(f'Frame Name: {self.frame_name}_Jacobian = {J}')
 
                 # normalize jacobian shape: CasADi returns [1, 6, nv], we need [3, nv] for position part
                 if not torch.is_tensor(J):
@@ -161,6 +161,10 @@ class PositionTask:
                 # Ensure shapes: A_masked should be (m, n) and b_masked (m,)
                 # ho_qp.Task handles empty tensors; just construct and return.
                 return Task(a=A_masked, b=b_masked, device=self.device, dtype=self.dtype, weight=weight)
+
+        def update(self,info: CentroidalModelInfoSimple):
+                """Update internal state from info (if needed)."""
+                self.info = info
 
         def type_name(self):
                 return "position"

@@ -10,4 +10,7 @@ state after info: tensor([0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.
 将Centroidal.py的矩阵/向量储存&输出变成GPU tensor 。
 测试position_task.py中的pos，att, J, A_masked, b_masked都为device='cuda:0'。
 
+# Q2 
+COM_OFFSET？
+
 

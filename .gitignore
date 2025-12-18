@@ -4,3 +4,5 @@ build/CMakeFiles
 build/Makefile
 *debug*
 */*.pyc
+*/*test*
+*test*

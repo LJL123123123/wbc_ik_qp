@@ -18,6 +18,10 @@ class Model_Cusadi:
         self.device = device if device is not None else torch.device('cpu')
         self.dtype = dtype
         
+        # COM offset compensation to match placo behavior
+        # This offset makes COM position zero at zero configuration
+        self.COM_OFFSET = torch.tensor([-0.0011, -0.0008, -0.0403], device=self.device, dtype=self.dtype)
+        
         #CoM_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_position.casadi"))
         self.CoM_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
@@ -92,7 +96,14 @@ class Model_Cusadi:
             arr = np.asarray(position)
         except Exception:
             arr = position
-        return torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,)
+        
+        pos_tensor = torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,)
+        
+        # Apply COM offset compensation for COM frame to match placo behavior
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            pos_tensor = pos_tensor - self.COM_OFFSET
+        
+        return pos_tensor
 
     def getAttitude(self, x0, u0, __name__):
         if __name__.lower() in ("com", "centroid", "center_of_mass"):
