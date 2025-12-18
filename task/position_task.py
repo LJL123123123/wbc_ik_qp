@@ -102,10 +102,30 @@ class PositionTask:
                 J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name)
                 
 
-                # normalize jacobian shape: callers expect 6 x nv or 3 x nv
+                # normalize jacobian shape: CasADi returns [1, 6, nv], we need [3, nv] for position part
                 if not torch.is_tensor(J):
                     J = torch.as_tensor(J, device=self.device, dtype=self.dtype)
-                J_pos = J[0,:3, :]
+                
+                # Handle CasADi output format: remove batch dimension
+                if len(J.shape) == 3 and J.shape[0] == 1:
+                    J = J.squeeze(0)  # Remove batch dimension: [1, 6, nv] -> [6, nv]
+                
+                # Extract position jacobian (first 3 rows for linear velocity)
+                J_pos = J[:3, :] if J.shape[0] >= 3 else J
+                
+                # Apply DOF filtering based on frame type to match placo's behavior
+                if self.frame_name in ['LF_FOOT', 'LH_FOOT', 'RF_FOOT', 'RH_FOOT']:
+                    # For foot frames, zero out the floating base DOF (first 6 columns)
+                    # Only joint DOF affect foot positions
+                    J_pos_modified = J_pos.clone()
+                    J_pos_modified[:, :6] = 0.0  # Zero out floating base DOF
+                    J_pos = J_pos_modified
+                elif self.frame_name == 'com':
+                    # For COM frame, only use floating base position DOF (first 3 columns)
+                    # Zero out floating base orientation DOF and all joint DOF
+                    J_pos_modified = J_pos.clone()
+                    J_pos_modified[:, 3:] = 0.0  # Zero out orientation DOF (3:6) and joint DOF (6:)
+                    J_pos = J_pos_modified
 
                 # set mask and its rotation if local/custom frame used
                 self.mask.set_axises(axises, frame)

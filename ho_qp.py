@@ -174,24 +174,50 @@ class HoQp:
             self.num_prev_slack_vars_ = self.higher_problem_.getSlackedNumVars()
             
             # For hierarchical QP, we need the nullspace of the stacked higher-priority constraints
-            # rather than just copying the stacked_z_ from the higher problem
+            # but we want to preserve DOF index mapping (not compact nullspace representation)
             higher_tasks = self.higher_problem_.getStackedTasks()
             if higher_tasks.a_.numel() > 0 and higher_tasks.a_.shape[0] > 0:
-                # Compute nullspace of the accumulated higher-priority constraints
+                # Create a nullspace that preserves DOF mapping by zeroing out used DOF
+                # instead of using compact QR-based nullspace representation
                 try:
+                    mat = higher_tasks.a_
+                    n = mat.shape[1]  # Total DOF count
+                    
+                    # Find which DOF are actually used by higher priority tasks
+                    # (have non-zero columns in the constraint matrix)
+                    used_dof = torch.any(torch.abs(mat) > 1e-10, dim=0)
+                    free_dof = ~used_dof
+                    num_free_dof = torch.sum(free_dof).item()
+                    
+                    if num_free_dof > 0:
+                        # Create nullspace matrix that preserves DOF indices
+                        # Shape: (n, num_free_dof) where each column corresponds to one free DOF
+                        self.stacked_z_prev_ = torch.zeros((n, num_free_dof), device=self.device, dtype=self.dtype)
+                        free_indices = torch.nonzero(free_dof, as_tuple=True)[0]
+                        for i, dof_idx in enumerate(free_indices):
+                            self.stacked_z_prev_[dof_idx, i] = 1.0
+                        
+                        print(f'init_vars: preserved DOF mapping nullspace, {num_free_dof} free DOF out of {n}')
+                        print(f'Used DOF: {torch.nonzero(used_dof, as_tuple=True)[0].tolist()}')
+                        print(f'Free DOF: {free_indices.tolist()}')
+                        
+                        # Save the free DOF indices for use in build_z_matrix
+                        self.free_dof_from_prev = free_indices.tolist()
+                    else:
+                        # All DOF are constrained by higher priority
+                        self.stacked_z_prev_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
+                        print(f'init_vars: higher tasks use all DOF, no nullspace')
+                except Exception as e:
+                    print(f'DOF-preserving nullspace computation failed: {e}, falling back to QR')
+                    # Fallback to original QR method
                     mat = higher_tasks.a_
                     Q, R = torch.linalg.qr(mat.T, mode='complete') 
                     rank = torch.linalg.matrix_rank(R)
                     n = mat.shape[1]
                     if rank < n:
                         self.stacked_z_prev_ = Q[:, rank:]
-                        print(f'init_vars: computed nullspace of stacked higher tasks, dim {self.stacked_z_prev_.shape[1]}')
                     else:
                         self.stacked_z_prev_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
-                        print(f'init_vars: higher tasks are full rank, no nullspace')
-                except Exception as e:
-                    print(f'Nullspace computation failed: {e}, using higher problem stacked_z_')
-                    self.stacked_z_prev_ = self.higher_problem_.getStackedZMatrix()
             else:
                 # No constraints from higher problem, use full space
                 n = max(t.a_.shape[1] if t.a_.numel() else 0, t.d_.shape[1] if t.d_.numel() else 0)
@@ -362,110 +388,75 @@ class HoQp:
         self.f_ = f
 
     def build_z_matrix(self):
-        # Build stacked_z_ similar to C++: if eq constraints exist compute kernel
+        # Build stacked_z_ matrix for hierarchical QP nullspace projection
         if self.has_eq_constraints_:
             assert self.task_.a_.shape[1] > 0
             
-            # Special case: if this is a standalone HoQp (no higher_problem), 
-            # we don't need nullspace projection - just solve the least squares problem directly
+            # Special case: if this is a standalone HoQp (no higher priority tasks), 
+            # we don't need nullspace projection - just solve directly
             if self.higher_problem_ is None:
-                # For standalone problems, we use the full space (identity matrix)
-                # The optimization will find the least-squares solution
                 n = self.task_.a_.shape[1]
                 self.stacked_z_ = torch.eye(n, device=self.device, dtype=self.dtype)
                 print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
                 return
             
-            # When stacked_z_prev_ has zero columns (no nullspace from higher priority),
-            # we have two options:
-            # 1. Strict nullspace projection: return empty (current behavior)  
-            # 2. Allow lower-priority influence via regularization/relaxation
+            # For hierarchical problems, we need to compute the nullspace correctly
             if self.stacked_z_prev_.shape[1] == 0:
-                # Higher priority has consumed all DOF. To match placo behavior
-                # where lower priority tasks can still influence the solution,
-                # we provide a small regularized identity matrix instead of
-                # strictly enforcing no DOF. This allows lower tasks to "push back"
-                # against higher priority with small weights.
-                n_prev = self.stacked_z_prev_.shape[0]
-                regularization_weight = 1e-6  # Small weight for lower priority influence
-                self.stacked_z_ = regularization_weight * torch.eye(n_prev, device=self.device, dtype=self.dtype)
-                print(f'build_z_matrix: no nullspace from higher priority, using regularized identity with weight {regularization_weight}')
-            else:
-                # compute nullspace of (A * stacked_z_prev_)
-                mat = self.task_.a_ @ self.stacked_z_prev_
-
+                # No free DOF from higher priority - current task is overconstrained
+                # But we still need to allow the task to contribute to the solution
+                # Use the task's own DOF as the active space
+                n = self.task_.a_.shape[1]
+                self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
+                print(f'build_z_matrix: no nullspace from higher priority, empty nullspace')
+                return
                 
-                # For underconstrained systems (m < n), directly compute nullspace
-                m, n = mat.shape
-                expected_null_dim = max(0, n - m)
+            # Compute nullspace while preserving DOF structure
+            # Key insight: we want to find which DOF are still free after applying current task constraints
+            # within the space allowed by higher priority tasks
+            
+            try:
+                # Project current task constraint into previous nullspace
+                A_proj = self.task_.a_ @ self.stacked_z_prev_  # Shape: [task_constraints, prev_free_dof]
                 
-                if expected_null_dim > 0:
-                    # This is an underconstrained system, should have nullspace
-                    # Use QR decomposition for more reliable nullspace computation
-                    try:
-                        # Transpose and compute QR to find nullspace
-                        Q, R = torch.linalg.qr(mat.T, mode='complete')
-                        # The nullspace is the columns of Q corresponding to zero rows in R
-                        rank = torch.linalg.matrix_rank(R)
-                        if rank < n:
-                            nullspace = Q[:, rank:]
-                            self.stacked_z_ = self.stacked_z_prev_ @ nullspace
-                            print(f'build_z_matrix: found nullspace of dimension {nullspace.shape[1]} using QR')
-                        else:
-                            # Full rank case, no nullspace
-                            n_prev = self.stacked_z_prev_.shape[0]
-                            self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
-                            print('build_z_matrix: full rank matrix, no nullspace')
-                    except Exception as e:
-                        print(f'QR nullspace computation failed: {e}, falling back to SVD')
-                        # Fall back to SVD
-                        u, s, vh = torch.linalg.svd(mat, full_matrices=False)
-                        eps = torch.finfo(s.dtype).eps
-                        max_sv = s.max() if s.numel() > 0 else torch.tensor(0.0, dtype=s.dtype, device=s.device)
-                        tol = max_sv * max(mat.shape) * eps * 100
-                        null_mask = s <= tol
-                        if null_mask.sum() > 0:
-                            # Use the last columns of vh.T (corresponding to small singular values)
-                            # vh is (min(m,n), n), so vh.T is (n, min(m,n))
-                            # For underconstrained case, take last (n-rank) columns
-                            rank = (s > tol).sum().item()
-                            if rank < n and rank < vh.shape[0]:
-                                # Get nullspace from the orthogonal complement
-                                # Since vh contains right singular vectors, and we want nullspace,
-                                # we need to construct it properly for underconstrained case
-                                nullspace_dim = n - rank
-                                if nullspace_dim > 0:
-                                    # Create orthogonal basis for nullspace
-                                    # For now, use regularized approach
-                                    reg_weight = 1e-6
-                                    self.stacked_z_ = reg_weight * torch.eye(n_prev, device=self.device, dtype=self.dtype)
-                                    print(f'build_z_matrix: using regularized identity for underconstrained case')
-                                else:
-                                    n_prev = self.stacked_z_prev_.shape[0]
-                                    self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
-                            else:
-                                n_prev = self.stacked_z_prev_.shape[0]
-                                self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
-                        else:
-                            n_prev = self.stacked_z_prev_.shape[0]
-                            self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
-                else:
-                    # Overconstrained or exactly constrained case
-                    u, s, vh = torch.linalg.svd(mat, full_matrices=False)
-                    eps = torch.finfo(s.dtype).eps
-                    max_sv = s.max() if s.numel() > 0 else torch.tensor(0.0, dtype=s.dtype, device=s.device)
-                    tol = max_sv * max(mat.shape) * eps * 100
+                if A_proj.shape[0] == 0 or A_proj.shape[1] == 0:
+                    # No constraints or no previous free DOF
+                    self.stacked_z_ = self.stacked_z_prev_
+                    print('build_z_matrix: no projected constraints, using previous nullspace')
+                    return
                     
-                    print('build_z_matrix singular values:', s, ' tol=', tol)
-                    
-                    null_mask = s <= tol
-                    if null_mask.sum() > 0:
-                        nullspace = vh.T[:, null_mask]
-                        self.stacked_z_ = self.stacked_z_prev_ @ nullspace
+                # Use QR decomposition for stable nullspace computation
+                Q, R = torch.linalg.qr(A_proj.T)  # QR of transpose to work with columns
+                
+                # Determine rank from R matrix
+                rank = 0
+                for i in range(min(R.shape[0], R.shape[1])):
+                    if torch.abs(R[i, i]) > 1e-12:
+                        rank += 1
                     else:
-                        n_prev = self.stacked_z_prev_.shape[0]
-                        self.stacked_z_ = torch.zeros((n_prev, 0), device=self.device, dtype=self.dtype)
+                        break
+                        
+                free_dofs = A_proj.shape[1] - rank
+                print(f'build_z_matrix: QR nullspace with {free_dofs} free DOF (rank={rank})')
+                
+                if free_dofs > 0:
+                    # Nullspace basis in the reduced space
+                    Z_local = Q[:, rank:]  # Shape: [prev_free_dof, remaining_free_dof]
+                    # Map back to full DOF space
+                    self.stacked_z_ = self.stacked_z_prev_ @ Z_local
+                else:
+                    # Current task fully constrains remaining DOF
+                    n = self.task_.a_.shape[1]
+                    self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
+                    print('build_z_matrix: current task fully constrains remaining space')
+                    
+            except Exception as e:
+                print(f'build_z_matrix: QR decomposition failed: {e}, using fallback')
+                # Fallback: no nullspace
+                n = self.task_.a_.shape[1]
+                self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
+                    
         else:
+            # No constraints, use previous nullspace directly
             self.stacked_z_ = self.stacked_z_prev_
 
     def solve_problem(self):

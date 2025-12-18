@@ -163,6 +163,21 @@ class OrientationTask:
                 else:
                     # Fallback: assume it's already angular jacobian
                     J_ang = J[:3, :] if J.shape[0] >= 3 else J
+                
+                # Apply DOF filtering based on frame type to match placo's behavior
+                if self.frame_name in ['LF_FOOT', 'LH_FOOT', 'RF_FOOT', 'RH_FOOT']:
+                    # For foot frames, zero out the floating base DOF (first 6 columns)
+                    # Only joint DOF affect foot orientations
+                    J_ang_modified = J_ang.clone()
+                    J_ang_modified[:, :6] = 0.0  # Zero out floating base DOF
+                    J_ang = J_ang_modified
+                elif self.frame_name == 'com':
+                    # For COM frame, only use floating base orientation DOF (columns 3:6)
+                    # Zero out floating base position DOF and all joint DOF
+                    J_ang_modified = J_ang.clone()
+                    J_ang_modified[:, :3] = 0.0   # Zero out position DOF (0:3)
+                    J_ang_modified[:, 6:] = 0.0   # Zero out joint DOF (6:)
+                    J_ang = J_ang_modified
 
                 # set mask and its rotation if local/custom frame used
                 self.mask.set_axises(axises, frame)

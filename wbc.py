@@ -369,9 +369,10 @@ class Wbc:
         high_priority_weight = 100.0   # High weight for high priority tasks
         low_priority_weight = 100.0    # Increased weight for low priority tasks
         
-        # Combine COM position and orientation tasks into a single high-priority task
-        combined_com_task = task_com_pos + task_com_ori
-        ho_high = HoQp(combined_com_task, higher_problem=None, device=dev, dtype=dtype, task_weight=high_priority_weight)
+        # Use only COM position task for high priority (matching placo behavior)
+        # placo COM task is only 3DOF position, no orientation component
+        com_frame_task = task_com_pos + task_com_ori
+        ho_high = HoQp(com_frame_task, higher_problem=None, device=dev, dtype=dtype, task_weight=high_priority_weight)
         # Diagnostic prints for ho_high
         print('\n--- ho_high diagnostic ---')
         print('ho_high.num_decision_vars_ =', ho_high.num_decision_vars_)
@@ -424,21 +425,28 @@ class Wbc:
         print('ho3.c_.shape =', ho3.c_.shape)
         print('ho3.getSolutions() =', ho3.getSolutions())
 
-        combined_ho = HoQp(task_RF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- combined_ho diagnostic ---')
-        print('combined.num_decision_vars_ =', combined_ho.num_decision_vars_)
-        print('combined.num_slack_vars_ =', combined_ho.num_slack_vars_)
-        print('combined.has_eq_constraints_ =', combined_ho.has_eq_constraints_)
-        print('combined.task_weight_ =', combined_ho.task_weight_)
-        print('combined.task_.weight_ =', combined_ho.task_.weight_)
-        print('combined.stacked_z_prev_.shape =', combined_ho.stacked_z_prev_.shape)
-        print('combined.getStackedZMatrix().shape =', combined_ho.getStackedZMatrix().shape)
-        print('combined.x_prev_.shape =', combined_ho.x_prev_.shape)
-        print('combined.h_.shape =', combined_ho.h_.shape)
-        print('combined.c_.shape =', combined_ho.c_.shape)
-        print('combined.d_.shape =', combined_ho.d_.shape)
-        print('combined.f_.shape =', combined_ho.f_.shape)
-        print('combined.getSolutions() =', combined_ho.getSolutions())
+        # Test LF_FOOT task to see if it appears in correct DOF indices (6,7,8)
+        combined_ho_LF = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- combined_ho_LF (LF_FOOT) diagnostic ---')
+        print('LF combined.getSolutions() =', combined_ho_LF.getSolutions())
+        
+        # Test LH_FOOT task to see if it appears in correct DOF indices (9,10,11)  
+        combined_ho_LH = HoQp(task_LH_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- combined_ho_LH (LH_FOOT) diagnostic ---')
+        print('LH combined.getSolutions() =', combined_ho_LH.getSolutions())
+        
+        # Test RF_FOOT task to see if it appears in correct DOF indices (12,13,14)
+        combined_ho_RF = HoQp(task_RF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- combined_ho_RF (RF_FOOT) diagnostic ---')
+        print('RF combined.getSolutions() =', combined_ho_RF.getSolutions())
+        
+        # Test RH_FOOT task to see if it appears in correct DOF indices (15,16,17)
+        combined_ho_RH = HoQp(task_RH_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
+        print('\n--- combined_ho_RH (RH_FOOT) diagnostic ---')
+        print('RH combined.getSolutions() =', combined_ho_RH.getSolutions())
+
+        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos
+        combined_ho = HoQp(combined_foot_task, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
         return combined_ho.getSolutions()
 
 
