@@ -197,9 +197,9 @@ class HoQp:
                         for i, dof_idx in enumerate(free_indices):
                             self.stacked_z_prev_[dof_idx, i] = 1.0
                         
-                        print(f'init_vars: preserved DOF mapping nullspace, {num_free_dof} free DOF out of {n}')
-                        print(f'Used DOF: {torch.nonzero(used_dof, as_tuple=True)[0].tolist()}')
-                        print(f'Free DOF: {free_indices.tolist()}')
+                        # print(f'init_vars: preserved DOF mapping nullspace, {num_free_dof} free DOF out of {n}')
+                        # print(f'Used DOF: {torch.nonzero(used_dof, as_tuple=True)[0].tolist()}')
+                        # print(f'Free DOF: {free_indices.tolist()}')
                         
                         # Save the free DOF indices for use in build_z_matrix
                         self.free_dof_from_prev = free_indices.tolist()
@@ -397,7 +397,7 @@ class HoQp:
             if self.higher_problem_ is None:
                 n = self.task_.a_.shape[1]
                 self.stacked_z_ = torch.eye(n, device=self.device, dtype=self.dtype)
-                print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
+                # print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
                 return
             
             # For hierarchical problems, we need to compute the nullspace correctly
@@ -436,7 +436,7 @@ class HoQp:
                         break
                         
                 free_dofs = A_proj.shape[1] - rank
-                print(f'build_z_matrix: QR nullspace with {free_dofs} free DOF (rank={rank})')
+                # print(f'build_z_matrix: QR nullspace with {free_dofs} free DOF (rank={rank})')
                 
                 if free_dofs > 0:
                     # Nullspace basis in the reduced space

@@ -158,7 +158,14 @@ class Wbc:
         except Exception:
             print("Failed to create LF_PositionTask, setting to None.")
             self.LF_PositionTask = None
-        try:
+        try:        # print('\n--- ho1 (LF standalone) diagnostic ---')
+        # print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
+        # print('ho1.task_weight_ =', ho1.task_weight_)
+        # print('ho1.task_.weight_ =', ho1.task_.weight_)
+        # print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
+        # print('ho1.h_.shape =', ho1.h_)
+        # print('ho1.c_.shape =', ho1.c_.shape)
+        # print('ho1.getSolutions() =', ho1.getSolutions())
             self.LH_PositionTask = PositionTask(
                 self.info,
                 frame_name='LH_FOOT',
@@ -320,7 +327,7 @@ class Wbc:
             measured_rbd_state,
             input_desired
         )
-        print("wbc_info.getstate()=", self.info.getstate())
+        # print("wbc_info.getstate()=", self.info.getstate())
         # Build tasks roughly following the C++ order
         # Define task weights - using more reasonable values to match placo
         com_weight = 1.0     # Base weight for COM position
@@ -361,14 +368,14 @@ class Wbc:
             weight=lf_weight
         )
         ho1 = HoQp(task_LF_pos, higher_problem=ho_high, device=device, dtype=dtype, task_weight=1.0)
-        print('\n--- ho1 (LF standalone) diagnostic ---')
-        print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
-        print('ho1.task_weight_ =', ho1.task_weight_)
-        print('ho1.task_.weight_ =', ho1.task_.weight_)
-        print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
-        print('ho1.h_.shape =', ho1.h_)
-        print('ho1.c_.shape =', ho1.c_.shape)
-        print('ho1.getSolutions() =', ho1.getSolutions())
+        # print('\n--- ho1 (LF standalone) diagnostic ---')
+        # print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
+        # print('ho1.task_weight_ =', ho1.task_weight_)
+        # print('ho1.task_.weight_ =', ho1.task_.weight_)
+        # print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
+        # print('ho1.h_.shape =', ho1.h_)
+        # print('ho1.c_.shape =', ho1.c_.shape)
+        # print('ho1.getSolutions() =', ho1.getSolutions())
         # Create nested hierarchical problems: task_com_pos is the higher (first) priority
         # HoQp expects a Task and an optional higher_problem (HoQp). Construct the
         # higher-priority problem first, then pass it as higher_problem to the

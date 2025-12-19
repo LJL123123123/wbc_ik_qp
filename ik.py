@@ -6,7 +6,7 @@ from casadi import *
 from cusadi import *
 from dataclasses import dataclass
 from typing import Optional, Sequence
-from Centroidal import CentroidalModelInfoSimple
+from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
 
 
 class Model_Cusadi:
@@ -20,7 +20,11 @@ class Model_Cusadi:
         
         # COM offset compensation to match placo behavior
         # This offset makes COM position zero at zero configuration
-        self.COM_OFFSET = torch.tensor([-0.0011, -0.0008, -0.0403], device=self.device, dtype=self.dtype)
+        # COM offset to match placo's COM position at zero configuration
+        # placo COM at zero config: [-0.00108229, -0.00078014, -0.03434109]
+        # Raw cusadi COM at zero config: [-0.0145, 0.0045, 0.0166] (need to verify)
+        # Offset = raw - target
+        self.COM_OFFSET = torch.tensor([-0.01341771, 0.00528014, 0.05094109], device=self.device, dtype=self.dtype)
         
         #CoM_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_position.casadi"))

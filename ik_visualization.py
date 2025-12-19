@@ -92,11 +92,16 @@ class URDFModel:
                     radius = float(cyl.attrib.get('radius', 0.0))
                     visuals.append(('cylinder', (length, radius), xyz, rpy))
                 elif geom.find('mesh') is not None:
-                    # mesh may reference filename; we don't load meshes here,
-                    # use a small box placeholder
+                    # mesh references filename; extract scale too
                     mesh = geom.find('mesh')
                     fname = mesh.attrib.get('filename', '')
-                    visuals.append(('mesh', fname, xyz, rpy))
+                    scale_str = mesh.attrib.get('scale', '1 1 1')
+                    scale = np.fromstring(scale_str, sep=' ')
+                    if len(scale) == 1:
+                        scale = np.array([scale[0], scale[0], scale[0]])
+                    elif len(scale) != 3:
+                        scale = np.array([1.0, 1.0, 1.0])
+                    visuals.append(('mesh', (fname, scale), xyz, rpy))
             self.links[name] = {'visuals': visuals}
 
         # collect joints
@@ -130,7 +135,12 @@ class URDFModel:
 class URDFMeshcatViewer:
     def __init__(self, model: URDFModel, open_browser: bool = True):
         self.model = model
-        self.vis = meshcat.Visualizer().open() if open_browser else meshcat.Visualizer()
+        try:
+            self.vis = meshcat.Visualizer().open() if open_browser else meshcat.Visualizer()
+        except Exception as e:
+            print(f"Warning: Failed to open browser automatically: {e}")
+            print("You can still access the visualizer at the URL shown above.")
+            self.vis = meshcat.Visualizer()
         self.link_nodes: Dict[str, str] = {}
 
         # create visuals
@@ -156,12 +166,29 @@ class URDFMeshcatViewer:
                     self.vis[node + f'/geom{k}'].set_object(obj)
                     self.vis[node + f'/geom{k}'].set_transform(make_transform(xyz, rpy))
                 elif geom_type == 'mesh':
-                    # placeholder for mesh
-                    fname, xyz, rpy = visinfo[1], visinfo[2], visinfo[3]
-                    # small box placeholder
-                    obj = g.Box([0.05, 0.05, 0.05])
-                    self.vis[node + f'/geom{k}'].set_object(obj)
-                    self.vis[node + f'/geom{k}'].set_transform(make_transform(xyz, rpy))
+                    # load actual mesh file
+                    (fname, scale), xyz, rpy = visinfo[1], visinfo[2], visinfo[3]
+                    try:
+                        # meshcat can handle dae files directly
+                        if os.path.exists(fname):
+                            obj = g.DaeMeshGeometry.from_file(fname)
+                            T = make_transform(xyz, rpy)
+                            # apply scale
+                            scale_matrix = np.diag([scale[0], scale[1], scale[2], 1.0])
+                            T = T @ scale_matrix
+                            self.vis[node + f'/geom{k}'].set_object(obj)
+                            self.vis[node + f'/geom{k}'].set_transform(T)
+                        else:
+                            # fallback to small box if file not found
+                            obj = g.Box([0.05, 0.05, 0.05])
+                            self.vis[node + f'/geom{k}'].set_object(obj)
+                            self.vis[node + f'/geom{k}'].set_transform(make_transform(xyz, rpy))
+                    except Exception as e:
+                        print(f"Warning: Could not load mesh {fname}: {e}")
+                        # fallback to small box on error
+                        obj = g.Box([0.05, 0.05, 0.05])
+                        self.vis[node + f'/geom{k}'].set_object(obj)
+                        self.vis[node + f'/geom{k}'].set_transform(make_transform(xyz, rpy))
 
             # frame axes
             axes_node = node + '/frame'
@@ -171,6 +198,21 @@ class URDFMeshcatViewer:
             self.vis[axes_node + '/y'].set_object(g.Cylinder(0.1, 0.01), g.MeshLambertMaterial(color=0x00FF00))
             # z (blue)
             self.vis[axes_node + '/z'].set_object(g.Cylinder(0.1, 0.01), g.MeshLambertMaterial(color=0x0000FF))
+
+            self.motor_map = {
+            "LF_HAA": 7,
+            "LF_HFE": 8,
+            "LF_KFE": 9,
+            "RF_HAA": 10,
+            "RF_HFE": 11,
+            "RF_KFE": 12,
+            "LH_HAA": 13,
+            "LH_HFE": 14,
+            "LH_KFE": 15,
+            "RH_HAA": 16,
+            "RH_HFE": 17,
+            "RH_KFE": 18
+        }
 
     def set_link_transform(self, link_name: str, T: np.ndarray):
         node = self.link_nodes[link_name]
@@ -198,34 +240,61 @@ class URDFMeshcatViewer:
         # For revolute or continuous joints, drive angle = sin(t)
         model = self.model
         t0 = time.time()
-        try:
-            while True:
-                t = time.time() - t0
-                # build dict of joint angles
-                angles: Dict[str, float] = {}
-                for jn, jinfo in model.joints.items():
-                    if jinfo['type'] in ('revolute', 'continuous'):
-                        angles[jn] = math.sin(t)
-                    else:
-                        angles[jn] = 0.0
+        while True:
+            t = time.time() - t0
+            # build dict of joint angles
+            angles: Dict[str, float] = {}
+            for jn, jinfo in model.joints.items():
+                if jinfo['type'] in ('revolute', 'continuous'):
+                    angles[jn] = math.sin(t)
+                    print(f'Joint {jn} angle: {angles[jn]:.3f}')
+                else:
+                    angles[jn] = 0.0
 
-                # traverse and compute transforms
-                def recurse(link_name: str, parent_T: np.ndarray):
-                    self.set_link_transform(link_name, parent_T)
-                    for jn in model.children.get(link_name, []):
-                        jinfo = model.joints[jn]
-                        origin_T = make_transform(jinfo['origin_xyz'], jinfo['origin_rpy'])
-                        angle = angles.get(jn, 0.0)
-                        axis = jinfo['axis']
-                        # build rotation about axis
-                        R = tf.rotation_matrix(angle, axis)
-                        child_T = parent_T @ origin_T @ R
-                        recurse(jinfo['child'], child_T)
+            # traverse and compute transforms
+            def recurse(link_name: str, parent_T: np.ndarray):
+                self.set_link_transform(link_name, parent_T)
+                for jn in model.children.get(link_name, []):
+                    jinfo = model.joints[jn]
+                    origin_T = make_transform(jinfo['origin_xyz'], jinfo['origin_rpy'])
+                    angle = angles.get(jn, 0.0)
+                    axis = jinfo['axis']
+                    # build rotation about axis
+                    R = tf.rotation_matrix(angle, axis)
+                    child_T = parent_T @ origin_T @ R
+                    recurse(jinfo['child'], child_T)
 
-                recurse(model.root, np.eye(4))
-                time.sleep(1.0 / rate)
-        except KeyboardInterrupt:
-            print('Animation interrupted')
+            recurse(model.root, np.eye(4))
+            time.sleep(1.0 / rate)
+
+    def animate_state(self, state_desired=np.zeros(12), rate: float = 60.0):
+            # For revolute or continuous joints, drive angle = sin(t)
+            model = self.model
+            # while True:
+            # build dict of joint angles
+            angles: Dict[str, float] = {}
+            for jn, jinfo in model.joints.items():
+                if jinfo['type'] in ('revolute', 'continuous'):
+                    angles[jn] = state_desired[self.motor_map[jn]]
+                    # print(f'Joint {jn} angle: {angles[jn]:.3f}')
+                else:
+                    angles[jn] = 0.0
+
+            # traverse and compute transforms
+            def recurse(link_name: str, parent_T: np.ndarray):
+                self.set_link_transform(link_name, parent_T)
+                for jn in model.children.get(link_name, []):
+                    jinfo = model.joints[jn]
+                    origin_T = make_transform(jinfo['origin_xyz'], jinfo['origin_rpy'])
+                    angle = angles.get(jn, 0.0)
+                    axis = jinfo['axis']
+                    # build rotation about axis
+                    R = tf.rotation_matrix(angle, axis)
+                    child_T = parent_T @ origin_T @ R
+                    recurse(jinfo['child'], child_T)
+
+            recurse(model.root, np.eye(4))
+            time.sleep(1.0 / rate)
 
 
 def main():
@@ -233,13 +302,14 @@ def main():
     parser.add_argument('path', help='Path to URDF file')
     parser.add_argument('--frames', nargs='+', help='Frame names to display (unused currently)')
     parser.add_argument('--animate', action='store_true', help='Animate joints (sinusoidal)')
+    parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')
     args = parser.parse_args()
 
     if not os.path.exists(args.path):
         raise FileNotFoundError(args.path)
 
     model = URDFModel(args.path)
-    viewer = URDFMeshcatViewer(model, open_browser=True)
+    viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser)
     viewer.display_static()
 
     if args.animate:
