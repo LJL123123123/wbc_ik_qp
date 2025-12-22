@@ -123,11 +123,6 @@ class Wbc:
         self.swing_kp_ = 50.0
         self.swing_kd_ = 1.0
 
-        # Construct a PositionTask for a representative frame. The project's
-        # PositionTask implementation expects (info, frame_name, target_world,
-        # device, dtype) and will fall back to a minimal robot if the full
-        # kinematic backend is not available. We choose a foot frame name by
-        # convention; users can override after Wbc construction if desired.
         try:
             self.com_PositionTask = PositionTask(
                 self.info,
@@ -146,8 +141,8 @@ class Wbc:
                 dtype=self.dtype,
             )
         except Exception:
-            print("Failed to create com_PositionTask, setting to None.")
-            self.com_PositionTask = None
+            print("Failed to create com_OrientationTask, setting to None.")
+            self.com_OrientationTask = None
         try:
             self.LF_PositionTask = PositionTask(
                 self.info,
@@ -159,13 +154,7 @@ class Wbc:
             print("Failed to create LF_PositionTask, setting to None.")
             self.LF_PositionTask = None
         try:        # print('\n--- ho1 (LF standalone) diagnostic ---')
-        # print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
-        # print('ho1.task_weight_ =', ho1.task_weight_)
-        # print('ho1.task_.weight_ =', ho1.task_.weight_)
-        # print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
-        # print('ho1.h_.shape =', ho1.h_)
-        # print('ho1.c_.shape =', ho1.c_.shape)
-        # print('ho1.getSolutions() =', ho1.getSolutions())
+
             self.LH_PositionTask = PositionTask(
                 self.info,
                 frame_name='LH_FOOT',
@@ -319,7 +308,7 @@ class Wbc:
         and runs the Python HoQp stack to produce a solution vector compatible
         with the decision variable layout described in the header.
         """
-        # Convert inputs to torch tensors for potential use
+
         device = self.device
         dtype = self.dtype
 
@@ -327,9 +316,7 @@ class Wbc:
             measured_rbd_state,
             input_desired
         )
-        # print("wbc_info.getstate()=", self.info.getstate())
-        # Build tasks roughly following the C++ order
-        # Define task weights - using more reasonable values to match placo
+
         com_weight = 1.0     # Base weight for COM position
         lf_weight = 1.0      # Base weight for foot position
         
@@ -339,9 +326,15 @@ class Wbc:
             frame="task",
             weight=com_weight
         )
-        # Use only COM position task for high priority (matching placo behavior)
-        # placo COM task is only 3DOF position, no orientation component
-        ho_high = HoQp(task_com_pos, higher_problem=None, device=device, dtype=dtype, task_weight=1.0)
+        task_com_ori = self.com_OrientationTask.as_task(
+            target_attitude=self.target_ori["com"],
+            axises="xyz",
+            frame="task",
+            weight=com_weight
+        )
+        task_com_frame = task_com_pos  + task_com_ori
+
+        ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=1.0)
 
         task_LF_pos = self.LF_PositionTask.as_task(
             target_world=self.target_pos["LF"],
@@ -368,26 +361,12 @@ class Wbc:
             weight=lf_weight
         )
         ho1 = HoQp(task_LF_pos, higher_problem=ho_high, device=device, dtype=dtype, task_weight=1.0)
-        # print('\n--- ho1 (LF standalone) diagnostic ---')
-        # print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
-        # print('ho1.task_weight_ =', ho1.task_weight_)
-        # print('ho1.task_.weight_ =', ho1.task_.weight_)
-        # print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
-        # print('ho1.h_.shape =', ho1.h_)
-        # print('ho1.c_.shape =', ho1.c_.shape)
-        # print('ho1.getSolutions() =', ho1.getSolutions())
-        # Create nested hierarchical problems: task_com_pos is the higher (first) priority
-        # HoQp expects a Task and an optional higher_problem (HoQp). Construct the
-        # higher-priority problem first, then pass it as higher_problem to the
-        # lower-priority HoQp instance.
-        # Define hierarchical weights for different priorities - using reasonable values
         high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
         low_priority_weight = 1.0     # Reasonable weight for low priority tasks
         
-        combined_foot_task = task_LF_pos 
-        # + task_RF_pos + task_LH_pos + task_RH_pos
+        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos
         combined_ho = HoQp(combined_foot_task, higher_problem=ho_high, device=device, dtype=dtype, task_weight=low_priority_weight)
-        return ho1.getSolutions()
+        return combined_ho.getSolutions()
 
 
 if __name__ == "__main__":

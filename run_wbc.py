@@ -74,8 +74,10 @@ t = 0.0
 def loop():
     global t,state_desired,target_pos,measured
     t += dt
-    target_pos["LF"][0] = 0.44 + 0.5*math.sin(2.0*math.pi*0.5*t)
-    print(f"Time: {t:.2f} sec, LF z target: {target_pos['LF'][2]:.3f}")
+    target_pos["LF"][0] = 0.44 + -0.2*math.sin(2.0*math.pi*0.5*t)
+    target_pos["LF"][1] = 0.27 + 0.2*math.sin(1.0*math.pi*0.5*t)
+    target_pos["LF"][2] = -0.55 + 0.2*math.sin(2.0*math.pi*0.5*t)
+    # print(f"Time: {t:.2f} sec, LF z target: {target_pos['LF'][2]:.3f}")
     wbc.update_targets(target_pos, target_ori)
     sol = wbc.update( measured, input_desired, mode=0)
     state_desired = measured
