@@ -447,7 +447,7 @@ class HoQp:
                     # Current task fully constrains remaining DOF
                     n = self.task_.a_.shape[1]
                     self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
-                    # print('build_z_matrix: current task fully constrains remaining space')
+                    print('build_z_matrix: current task fully constrains remaining space')
                     
             except Exception as e:
                 print(f'build_z_matrix: QR decomposition failed: {e}, using fallback')

@@ -332,7 +332,8 @@ class Wbc:
             frame="task",
             weight=com_weight
         )
-        task_com_frame = task_com_pos  + task_com_ori
+        task_com_frame = task_com_pos  
+        # + task_com_ori
 
         ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=1.0)
 
@@ -360,7 +361,6 @@ class Wbc:
             frame="task",
             weight=lf_weight
         )
-        ho1 = HoQp(task_LF_pos, higher_problem=ho_high, device=device, dtype=dtype, task_weight=1.0)
         high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
         low_priority_weight = 1.0     # Reasonable weight for low priority tasks
         
