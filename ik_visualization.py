@@ -133,7 +133,7 @@ class URDFModel:
 
 
 class URDFMeshcatViewer:
-    def __init__(self, model: URDFModel, open_browser: bool = True):
+    def __init__(self, model: URDFModel, motor_map_: list, open_browser: bool = True):
         self.model = model
         try:
             self.vis = meshcat.Visualizer().open() if open_browser else meshcat.Visualizer()
@@ -199,20 +199,7 @@ class URDFMeshcatViewer:
             # z (blue)
             self.vis[axes_node + '/z'].set_object(g.Cylinder(0.1, 0.01), g.MeshLambertMaterial(color=0x0000FF))
 
-            self.motor_map = {
-            "LF_HAA": 7,
-            "LF_HFE": 8,
-            "LF_KFE": 9,
-            "LH_HAA": 10,
-            "LH_HFE": 11,
-            "LH_KFE": 12,
-            "RF_HAA": 13,
-            "RF_HFE": 14,
-            "RF_KFE": 15,
-            "RH_HAA": 16,
-            "RH_HFE": 17,
-            "RH_KFE": 18
-        }
+            self.motor_map = motor_map_
 
     def set_link_transform(self, link_name: str, T: np.ndarray):
         node = self.link_nodes[link_name]
@@ -247,7 +234,7 @@ class URDFMeshcatViewer:
             for jn, jinfo in model.joints.items():
                 if jinfo['type'] in ('revolute', 'continuous'):
                     angles[jn] = math.sin(t)
-                    print(f'Joint {jn} angle: {angles[jn]:.3f}')
+                    # print(f'Joint {jn} angle: {angles[jn]:.3f}')
                 else:
                     angles[jn] = 0.0
 

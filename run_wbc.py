@@ -42,8 +42,7 @@ parser.add_argument('--frames', nargs='+', help='Frame names to display (unused 
 parser.add_argument('--animate', action='store_true', help='Animate joints (sinusoidal)')
 parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')
 args = parser.parse_args()
-model = URDFModel("/home/ReLUQP-py/anymal_b_simple_description/urdf/robot.urdf")
-viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser)
+model = URDFModel(args.path)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.float64
@@ -66,6 +65,22 @@ target_ori = {
             "RF": torch.eye(3, device=device, dtype=dtype),
             "RH": torch.eye(3, device=device, dtype=dtype),
         }
+
+motor_map = {
+    "FL_hip_joint": 7,
+    "FL_thigh_joint": 8,
+    "FL_calf_joint": 9,
+    "RL_hip_joint": 10,
+    "RL_thigh_joint": 11,
+    "RL_calf_joint": 12,
+    "FR_hip_joint": 13,
+    "FR_thigh_joint": 14,
+    "FR_calf_joint": 15,
+    "RR_hip_joint": 16,
+    "RR_thigh_joint": 17,
+    "RR_calf_joint": 18
+}
+viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=motor_map)
 
 wbc.update_targets(target_pos, target_ori)
 
