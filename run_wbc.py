@@ -53,10 +53,10 @@ wbc = Wbc("", pino_interface, info, verbose=True, device=device, dtype=dtype)
 
 target_pos = {
             "com": torch.tensor([0., 0., 0.], device=device, dtype=dtype),
-            "LH": torch.tensor([-0.44, 0.27, -0.55], device=device, dtype=dtype),
-            "LF": torch.tensor([0.44, 0.27, -0.55], device=device, dtype=dtype),
-            "RF": torch.tensor([0.44, -0.27, -0.55], device=device, dtype=dtype),
-            "RH": torch.tensor([-0.44, -0.27, -0.55], device=device, dtype=dtype),
+            "LH": torch.tensor([-0.25, 0.15, -0.26], device=device, dtype=dtype),
+            "LF": torch.tensor([0.14, 0.15, -0.26], device=device, dtype=dtype),
+            "RF": torch.tensor([0.14, -0.15, -0.26], device=device, dtype=dtype),
+            "RH": torch.tensor([-0.25, -0.15, -0.26], device=device, dtype=dtype),
         }
 target_ori = {
             "com": torch.eye(3, device=device, dtype=dtype),
@@ -85,10 +85,10 @@ viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=m
 wbc.update_targets(target_pos, target_ori)
 
 measured = torch.tensor([0., 0., 0., 0., 0., 0., 0.,
-                                        0., 0., 0.,
-                                        0., 0., 0.0,
-                                        0., 0., 0.0,
-                                        0., 0., 0.0],device=device, dtype=dtype)
+                                        0., 1.08, -1.80,
+                                        0., 1.08, -1.80,
+                                        0., 1.08, -1.80,
+                                        0., 1.08, -1.80,],device=device, dtype=dtype)
 input_desired = torch.tensor([0., 0., 0.0, 0., 0., 0.,
                                         0., 0., 0.0,
                                         0., 0., 0.0,
@@ -105,55 +105,55 @@ t = 0.0
 @schedule(interval=dt)
 def loop():
     global t,state_desired,target_pos,measured,FL_error_csv_initialized
-    t += 1.*dt
+    t += 3.*dt
     # target_pos["com"][0] = 0.0 + 0.1*t
     h = 0.1 / -0.25
-    l = 0.2
+    l = 0.1
     if t%2.0 < 1.0:
-        target_pos["LF"][0] = 0.44 + -l * (t % 2.0) 
-        target_pos["LF"][1] = 0.27
-        target_pos["LF"][2] = -0.55 
+        target_pos["LF"][0] = 0.14 + -l * (t % 2.0) + 0.1
+        target_pos["LF"][1] = 0.15
+        target_pos["LF"][2] = -0.26
 
-        target_pos["RH"][0] = -0.44 + -l * (t % 2.0) + 0.1
-        target_pos["RH"][1] = -0.27
-        target_pos["RH"][2] = -0.55
+        target_pos["RH"][0] = -0.25 + -l * (t % 2.0) + 0.1 + 0.1
+        target_pos["RH"][1] = -0.15
+        target_pos["RH"][2] = -0.26
 
-        target_pos["LH"][0] = -0.44 + l * (t % 2.0) 
-        target_pos["LH"][2] = -0.55 + h*(t % 2.0)*(t % 2.0-1.0)
+        target_pos["LH"][0] = -0.25 + l * (t % 2.0) + 0.1
+        target_pos["LH"][2] = -0.26 + h*(t % 2.0)*(t % 2.0-1.0)
 
-        target_pos["RF"][0] = 0.44 + l * (t % 2.0) - l
-        target_pos["RF"][2] = -0.55 + h*(t % 2.0)*(t % 2.0-1.0)
+        target_pos["RF"][0] = 0.14 + l * (t % 2.0) - l +0.1
+        target_pos["RF"][2] = -0.26 + h*(t % 2.0)*(t % 2.0-1.0)
 
     else :
-        target_pos["LH"][0] = -0.44 + -l * (t % 2.0 - 1.0) +l
-        target_pos["LH"][2] = -0.55 
+        target_pos["LH"][0] = -0.25 + -l * (t % 2.0 - 1.0) +l +0.1
+        target_pos["LH"][2] = -0.26
 
-        target_pos["RF"][0] = 0.44 + -l * (t % 2.0 - 1.0)
-        target_pos["RF"][2] = -0.55 
+        target_pos["RF"][0] = 0.14 + -l * (t % 2.0 - 1.0) +0.1 
+        target_pos["RF"][2] = -0.26
 
-        target_pos["LF"][0] = 0.44 + l * ((t % 2.0) - 1.0) - l 
-        target_pos["LF"][1] = 0.27
-        target_pos["LF"][2] = -0.55 + h*((t % 2.0) - 1.0)*((t % 2.0)-1.0 - 1.0)
+        target_pos["LF"][0] = 0.14 + l * ((t % 2.0) - 1.0) - l +0.1 
+        target_pos["LF"][1] = 0.15
+        target_pos["LF"][2] = -0.26 + h*((t % 2.0) - 1.0)*((t % 2.0)-1.0 - 1.0)
 
-        target_pos["RH"][0] = -0.44 + l * ((t % 2.0) - 1.0) - l + 0.1
-        target_pos["RH"][1] = -0.27
-        target_pos["RH"][2] = -0.55 + h*((t % 2.0) - 1.0)*((t % 2.0) - 1.0 - 1.0)
+        target_pos["RH"][0] = -0.25 + l * ((t % 2.0) - 1.0) - l + 0.1 +0.1
+        target_pos["RH"][1] = -0.15
+        target_pos["RH"][2] = -0.26 + h*((t % 2.0) - 1.0)*((t % 2.0) - 1.0 - 1.0)
         
-    # target_pos["LF"][0] = 0.44 + 0.5*math.sin(2.0*math.pi*0.5*t)
-    # target_pos["LF"][1] = 0.27 + -0.5*math.sin(1.0*math.pi*0.5*t)
-    # target_pos["LF"][2] = -0.55 + -0.5*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["LF"][0] = 0.20 + 0.1*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["LF"][1] = 0.13 + -0.1*math.sin(1.0*math.pi*0.5*t)
+    # target_pos["LF"][2] = -0.43 + -0.1*math.sin(2.0*math.pi*0.5*t)
 
-    # target_pos["RF"][0] = 0.44 + 0.2*math.sin(2.0*math.pi*0.5*t)
-    # target_pos["RF"][1] = -0.27 + -0.2*math.sin(1.0*math.pi*0.5*t)
-    # target_pos["RF"][2] = -0.55 + -0.2*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["RF"][0] = 0.20 + 0.1*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["RF"][1] = -0.13 + -0.1*math.sin(1.0*math.pi*0.5*t)
+    # target_pos["RF"][2] = -0.43 + -0.1*math.sin(2.0*math.pi*0.5*t)
 
-    # target_pos["LH"][0] = -0.44 + 0.2*math.sin(2.0*math.pi*0.5*t)
-    # target_pos["LH"][1] = 0.27 + -0.2*math.sin(1.0*math.pi*0.5*t)
-    # target_pos["LH"][2] = -0.55 + -0.2*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["LH"][0] = -0.20 + 0.1*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["LH"][1] = 0.13 + -0.1*math.sin(1.0*math.pi*0.5*t)
+    # target_pos["LH"][2] = -0.43 + -0.1*math.sin(2.0*math.pi*0.5*t)
 
-    # target_pos["RH"][0] = -0.44 + -0.2*math.sin(2.0*math.pi*0.5*t)
-    # target_pos["RH"][1] = -0.27 + 0.2*math.sin(1.0*math.pi*0.5*t)
-    # target_pos["RH"][2] = -0.55 + 0.5 * t
+    # target_pos["RH"][0] = -0.20 + -0.1*math.sin(2.0*math.pi*0.5*t)
+    # target_pos["RH"][1] = -0.13 + 0.1*math.sin(1.0*math.pi*0.5*t)
+    # target_pos["RH"][2] = -0.43 + -0.1*math.sin(2.0*math.pi*0.5*t)
 
     # print(f"Time: {t:.2f} sec, LF z target: {target_pos['LF'][2]:.3f}")
     wbc.update_targets(target_pos, target_ori)
