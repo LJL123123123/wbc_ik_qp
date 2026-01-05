@@ -3,6 +3,7 @@ __pycache__
 build/CMakeFiles
 build/Makefile
 *debug*
+*demo*
 */*.pyc
 */*test*
 *test*

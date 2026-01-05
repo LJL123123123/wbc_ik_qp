@@ -332,9 +332,11 @@ class Wbc:
             frame="task",
             weight=com_weight
         )
-        task_com_frame = task_com_pos  + task_com_ori
-
-        ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=1.0)
+    # Combine COM position and orientation into the high-priority task so the
+    # optimizer actively tracks both position and attitude of the base.
+        task_com_frame =  task_com_pos 
+        # + task_com_ori
+        ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=100.0)
 
         task_LF_pos = self.LF_PositionTask.as_task(
             target_world=self.target_pos["LF"],
@@ -361,11 +363,14 @@ class Wbc:
             weight=lf_weight
         )
         high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
-        low_priority_weight = 1.0     # Reasonable weight for low priority tasks
+        low_priority_weight = .1     # Reasonable weight for low priority tasks
         ho_RF = HoQp(task_LF_pos, higher_problem=None, device=device, dtype=dtype, task_weight=high_priority_weight)
         
         combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos
+        combine_foot_ho = HoQp(combined_foot_task, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
         combined_ho = HoQp(combined_foot_task, higher_problem=ho_high, device=device, dtype=dtype, task_weight=low_priority_weight)
+    # Return the full stacked solution so both high-priority (COM pos+ori)
+    # and lower-priority (foot positions) objectives are considered.
         return combined_ho.getSolutions()
 
 

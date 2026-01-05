@@ -279,8 +279,27 @@ class URDFMeshcatViewer:
                     R = tf.rotation_matrix(angle, axis)
                     child_T = parent_T @ origin_T @ R
                     recurse(jinfo['child'], child_T)
+            # robot_T = tf.translation_matrix(state_desired[0:3])
+            # 四元数在 state_desired[3:7]，转为 4x4 旋转矩阵并与平移合并
+            quat = np.asarray(state_desired[3:7])
+            if quat.shape[0] != 4:
+                raise ValueError("state_desired[3:7] must be a quaternion of length 4")
+            # 处理四元数顺序问题：用户常给 [x,y,z,w]，但 meshcat 的 quaternion_matrix 期望 [w,x,y,z]
+            # 如果检测到第一项接近0而最后一项接近1（例如 [0,0,0,1]），我们将其视为 [x,y,z,w]
+            quat = np.array([quat[3], quat[0], quat[1], quat[2]])
 
-            recurse(model.root, np.eye(4))
+            # 归一化四元数以避免数值问题；如果范数接近0则使用单位四元数
+            qnorm = np.linalg.norm(quat)
+            if qnorm <= 1e-8:
+                print("Warning: provided quaternion has near-zero length; using identity quaternion instead")
+                quat = np.array([1.0, 0.0, 0.0, 0.0])
+            else:
+                quat = quat / qnorm
+            # meshcat.transformations 提供 quaternion_matrix(quat) -> 4x4 矩阵
+            robot_R = tf.quaternion_matrix(quat)
+            robot_T = tf.translation_matrix(state_desired[0:3]) @ robot_R
+
+            recurse(model.root, robot_T)
             time.sleep(1.0 / rate)
 
 

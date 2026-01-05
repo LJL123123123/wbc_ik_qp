@@ -37,6 +37,8 @@ class Model_Cusadi:
         self.CoM_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_velocity.casadi"))
         self.CoM_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_jacobian_world.casadi"))
+        self.CoM_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
         # Foot_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_position.casadi"))
@@ -65,6 +67,15 @@ class Model_Cusadi:
         self.RH_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_jacobian.casadi"))
         self.RF_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_jacobian_world.casadi"))
+        self.LF_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_jacobian_world.casadi"))
+        self.LH_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_jacobian_world.casadi"))
+        self.RH_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_jacobian_world.casadi"))
+        self.RF_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_velocity.casadi"))
         self.LF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
@@ -160,6 +171,29 @@ class Model_Cusadi:
             raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
 
         return jacobian
+
+    def getJacobian_world(self, x0, u0, __name__):
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_jacobian_world_cusadi', None) is None:
+                raise RuntimeError("CoM jacobian world cusadi function not available")
+            self.CoM_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.CoM_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
+            self.LF_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.LF_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "LH_FOOT":
+            self.LH_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.LH_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "RH_FOOT":
+            self.RH_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.RH_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "RF_FOOT":
+            self.RF_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.RF_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        else:
+            raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
+
+        return jacobian_world
 
     def getVelocity(self, x0, u0, __name__):
         if __name__.lower() in ("com", "centroid", "center_of_mass"):
