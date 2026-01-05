@@ -19,10 +19,10 @@ Usage:
 
 from typing import Optional, Sequence
 import torch
-from wbc_ik_qp.tools.axises_mask import AxisesMask
-from wbc_ik_qp.ik import Model_Cusadi
-from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
-from wbc_ik_qp.ho_qp import Task
+from tools.axises_mask import AxisesMask
+from ik import Model_Cusadi
+from Centroidal import CentroidalModelInfoSimple
+from ho_qp import Task
 
 
 class PositionTask:

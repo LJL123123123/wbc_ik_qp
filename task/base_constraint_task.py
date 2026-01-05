@@ -3,8 +3,8 @@ Base constraint task for constraining the floating base to zero motion
 """
 
 import torch
-from wbc_ik_qp.ho_qp import Task
-from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
+from ho_qp import Task
+from Centroidal import CentroidalModelInfoSimple
 
 
 class BaseConstraintTask:

@@ -7,3 +7,5 @@ build/Makefile
 */*.pyc
 */*test*
 *test*
+*/__init__.py
+__init__.py

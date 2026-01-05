@@ -1,8 +1,8 @@
 from ischedule import schedule, run_loop
-from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
-from wbc_ik_qp.wbc import Wbc, FakePinocchioInterface
-from wbc_ik_qp.ik_visualization import URDFModel,URDFMeshcatViewer
-from wbc_ik_qp.ik import Model_Cusadi
+from Centroidal import CentroidalModelInfoSimple
+from wbc import Wbc, FakePinocchioInterface
+from ik_visualization import URDFModel,URDFMeshcatViewer
+from ik import Model_Cusadi
 
 import argparse
 import time
@@ -21,41 +21,41 @@ import atexit
 import os
 import csv
 
-com_target_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/com_target_data.csv'
+com_target_csv_path = './debug/com_target_data.csv'
 com_target_csv_initialized = False
-FL_target_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/FL_target_data.csv'
+FL_target_csv_path = './debug/FL_target_data.csv'
 FL_target_csv_initialized = False
-RF_target_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RF_target_data.csv'
+RF_target_csv_path = './debug/RF_target_data.csv'
 RF_target_csv_initialized = False 
-LH_target_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/LH_target_data.csv'
+LH_target_csv_path = './debug/LH_target_data.csv'
 LH_target_csv_initialized = False
-RH_target_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RH_target_data.csv'
+RH_target_csv_path = './debug/RH_target_data.csv'
 RH_target_csv_initialized = False
 
-com_opimal_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/com_opimal_data.csv'
+com_opimal_csv_path = './debug/com_opimal_data.csv'
 com_opimal_csv_initialized = False
-FL_opimal_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/FL_opimal_data.csv'
+FL_opimal_csv_path = './debug/FL_opimal_data.csv'
 FL_opimal_csv_initialized = False
-RF_opimal_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RF_opimal_data.csv'
+RF_opimal_csv_path = './debug/RF_opimal_data.csv'
 RF_opimal_csv_initialized = False
-LH_opimal_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/LH_opimal_data.csv'
+LH_opimal_csv_path = './debug/LH_opimal_data.csv'
 LH_opimal_csv_initialized = False
-RH_opimal_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RH_opimal_data.csv'
+RH_opimal_csv_path = './debug/RH_opimal_data.csv'
 RH_opimal_csv_initialized = False
 
-com_state_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/com_state_data.csv'
+com_state_csv_path = './debug/com_state_data.csv'
 com_state_csv_initialized = False
-FL_state_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/FL_state_data.csv'
+FL_state_csv_path = './debug/FL_state_data.csv'
 FL_state_csv_initialized = False
-RF_state_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RF_state_data.csv'
+RF_state_csv_path = './debug/RF_state_data.csv'
 RF_state_csv_initialized = False
-LH_state_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/LH_state_data.csv'
+LH_state_csv_path = './debug/LH_state_data.csv'
 LH_state_csv_initialized = False
-RH_state_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/RH_state_data.csv'
+RH_state_csv_path = './debug/RH_state_data.csv'
 RH_state_csv_initialized = False
 
-sys.path.append('/home/ReLUQP-py/wbc_ik_qp')
-sys.path.append('/home/ReLUQP-py')
+sys.path.append('.')
+sys.path.append('/home/wbc_ik_qp')
 
 parser = argparse.ArgumentParser(description='Simple URDF MeshCat viewer (no pinocchio/placo)')
 parser.add_argument('path', help='Path to URDF file')
@@ -187,7 +187,7 @@ except NameError:
         prev_phi = torch.zeros((3,), device=device, dtype=dtype)
 
 # CSV logging for raw vs clamped orientation increment (phi)
-sol_phi_csv_path = '/home/ReLUQP-py/wbc_ik_qp/debug/sol_phi_data.csv'
+sol_phi_csv_path = './debug/sol_phi_data.csv'
 sol_phi_csv_initialized = False
 
 # ------------------ keyboard control setup ------------------

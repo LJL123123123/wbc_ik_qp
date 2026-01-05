@@ -1,12 +1,36 @@
 import os
 import numpy as np
 import torch
-from src import *
 from casadi import *
-from cusadi import *
+try:
+    # Preferred: normal import when a proper `cusadi` package exists.
+    from cusadi import *  # type: ignore
+except ModuleNotFoundError:
+    # Fallback: the editable `cusadi` repo that many users install is packaged
+    # incorrectly (it exposes `src` as the package name, not `cusadi`), which
+    # means `pip list` shows cusadi but `import cusadi` fails.
+    # In that case, try importing from that project's `src` package.
+    try:
+        # The developer machine often has cusadi checked out at /home/cusadi-main
+        # and installed as an editable dist that unfortunately does NOT expose a
+        # top-level `cusadi` module. Instead, its python package is named `src`.
+        # We temporarily add that repo root to sys.path and import from it.
+        import sys
+
+        cusadi_repo = "/home/cusadi-main"
+        if cusadi_repo not in sys.path:
+            sys.path.insert(0, cusadi_repo)
+        from src import CusadiFunction  # type: ignore
+    except Exception as e:
+        raise ModuleNotFoundError(
+            "Cannot import `cusadi`. `pip list` may show a cusadi distribution, but it doesn't provide "
+            "an importable `cusadi` module in this environment. I also tried the common editable-layout "
+            "fallback (/home/cusadi-main -> import from its `src` package) and that failed. "
+            f"Original error: {e}"
+        )
 from dataclasses import dataclass
 from typing import Optional, Sequence
-from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
+from Centroidal import CentroidalModelInfoSimple
 
 
 class Model_Cusadi:
@@ -26,7 +50,7 @@ class Model_Cusadi:
         # Offset = raw - target
         self.COM_OFFSET = torch.tensor([-0.01341771, 0.00528014, 0.05094109], device=self.device, dtype=self.dtype)
         
-        casadi_dir = "/home/ReLUQP-py/wbc_ik_qp/src/casadi_functions"
+        casadi_dir = "./src/casadi_functions"
         robot_name = "go1"
         #CoM_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_position.casadi"))

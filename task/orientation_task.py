@@ -22,10 +22,10 @@ import torch
 import numpy as np
 
 try:
-    from wbc_ik_qp.tools.axises_mask import AxisesMask
-    from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
-    from wbc_ik_qp.ik import Model_Cusadi  
-    from wbc_ik_qp.ho_qp import Task
+    from tools.axises_mask import AxisesMask
+    from Centroidal import CentroidalModelInfoSimple
+    from ik import Model_Cusadi  
+    from ho_qp import Task
 except ImportError:
     # Fallback imports for testing environments
     print("Warning: Some dependencies not available, using fallbacks for OrientationTask")

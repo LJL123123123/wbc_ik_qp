@@ -15,7 +15,7 @@ The API follows the C++ class closely: Task, HoQp with similar getters.
 """
 from typing import Optional
 import torch
-from wbc_ik_qp.ik import *
+from ik import *
 
 
 class Task:

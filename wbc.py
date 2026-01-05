@@ -21,17 +21,30 @@ import math
 try:
     from ho_qp import Task, HoQp
 except Exception:
-    # If running as package, try relative import
-    from .ho_qp import Task, HoQp
+    # If running as a plain script (e.g. `python run_wbc.py`), relative imports
+    # fail with "no known parent package". Prefer retrying absolute import after
+    # ensuring this directory is on sys.path.
+    try:
+        from .ho_qp import Task, HoQp
+    except Exception:
+        import os
+        import sys
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from ho_qp import Task, HoQp
 
 from Centroidal import CentroidalModelInfoSimple
 from task.position_task import PositionTask
 from task.orientation_task import OrientationTask
+from task.base_constraint_task import BaseConstraintTask
 
 @dataclass
 class WbcTask:
     position: PositionTask
     orientation: OrientationTask
+    base_constraint: BaseConstraintTask
 
 class FakePinocchioModel:
     def __init__(self, nq: int):
@@ -200,6 +213,18 @@ class Wbc:
             "RH": torch.eye(3, device=self.device, dtype=self.dtype),
         }
 
+        try:
+            # BaseConstraintTask expects (info, device, dtype)
+            # (do not pass `self` here; that caused a signature mismatch)
+            self.base_constraint = BaseConstraintTask(
+                self.info,
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create base_constraint, setting to None.")
+            self.base_constraint = None
+
 
     # ----------------- Task builders -----------------
     def formulateFloatingBaseEomTask(self) -> Task:
@@ -334,8 +359,8 @@ class Wbc:
         )
     # Combine COM position and orientation into the high-priority task so the
     # optimizer actively tracks both position and attitude of the base.
-        task_com_frame =  task_com_pos 
-        # + task_com_ori
+        task_com_frame =  task_com_pos + task_com_ori
+        # print('task_com_frame.a_:', task_com_frame.a_)
         ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=100.0)
 
         task_LF_pos = self.LF_PositionTask.as_task(
@@ -362,15 +387,21 @@ class Wbc:
             frame="task",
             weight=lf_weight
         )
+        constraint = self.base_constraint.as_task(weight=.01)
         high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
         low_priority_weight = .1     # Reasonable weight for low priority tasks
         ho_RF = HoQp(task_LF_pos, higher_problem=None, device=device, dtype=dtype, task_weight=high_priority_weight)
-        
-        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos
+
+        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos + constraint
+        const_task = HoQp(constraint, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
+        # print('combined_foot_task.a_:', combined_foot_task.a_)
         combine_foot_ho = HoQp(combined_foot_task, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
-        combined_ho = HoQp(combined_foot_task, higher_problem=ho_high, device=device, dtype=dtype, task_weight=low_priority_weight)
+        combined_ho = HoQp(task_com_frame, higher_problem=combine_foot_ho, device=device, dtype=dtype, task_weight=low_priority_weight)
     # Return the full stacked solution so both high-priority (COM pos+ori)
     # and lower-priority (foot positions) objectives are considered.
+        # Optionally add base constraint as the lowest-priority task on top of
+        # the existing stack.
+
         return combined_ho.getSolutions()
 
 
