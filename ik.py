@@ -1,9 +1,33 @@
 import os
 import numpy as np
 import torch
-from src import *
 from casadi import *
-from cusadi import *
+try:
+    # Preferred: normal import when a proper `cusadi` package exists.
+    from cusadi import *  # type: ignore
+except ModuleNotFoundError:
+    # Fallback: the editable `cusadi` repo that many users install is packaged
+    # incorrectly (it exposes `src` as the package name, not `cusadi`), which
+    # means `pip list` shows cusadi but `import cusadi` fails.
+    # In that case, try importing from that project's `src` package.
+    try:
+        # The developer machine often has cusadi checked out at /home/cusadi-main
+        # and installed as an editable dist that unfortunately does NOT expose a
+        # top-level `cusadi` module. Instead, its python package is named `src`.
+        # We temporarily add that repo root to sys.path and import from it.
+        import sys
+
+        cusadi_repo = "/home/cusadi-main"
+        if cusadi_repo not in sys.path:
+            sys.path.insert(0, cusadi_repo)
+        from src import CusadiFunction  # type: ignore
+    except Exception as e:
+        raise ModuleNotFoundError(
+            "Cannot import `cusadi`. `pip list` may show a cusadi distribution, but it doesn't provide "
+            "an importable `cusadi` module in this environment. I also tried the common editable-layout "
+            "fallback (/home/cusadi-main -> import from its `src` package) and that failed. "
+            f"Original error: {e}"
+        )
 from dataclasses import dataclass
 from typing import Optional, Sequence
 from Centroidal import CentroidalModelInfoSimple
@@ -18,52 +42,73 @@ class Model_Cusadi:
         self.device = device if device is not None else torch.device('cpu')
         self.dtype = dtype
         
+        # COM offset compensation to match placo behavior
+        # This offset makes COM position zero at zero configuration
+        # COM offset to match placo's COM position at zero configuration
+        # placo COM at zero config: [-0.00108229, -0.00078014, -0.03434109]
+        # Raw cusadi COM at zero config: [-0.0145, 0.0045, 0.0166] (need to verify)
+        # Offset = raw - target
+        self.COM_OFFSET = torch.tensor([-0.01341771, 0.00528014, 0.05094109], device=self.device, dtype=self.dtype)
+        
+        casadi_dir = "./src/casadi_functions"
+        robot_name = "go1"
         #CoM_cusadi
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_position.casadi"))
-        self.CoM_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_attitude.casadi"))
-        self.CoM_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_jacobian.casadi"))
-        self.CoM_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_com_velocity.casadi"))
-        self.CoM_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_position.casadi"))
+        self.CoM_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_attitude.casadi"))
+        self.CoM_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_jacobian.casadi"))
+        self.CoM_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_velocity.casadi"))
+        self.CoM_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_jacobian_world.casadi"))
+        self.CoM_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
         # Foot_cusadi
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_position.casadi"))
-        self.LF_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LH_FOOT_position.casadi"))
-        self.LH_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RH_FOOT_position.casadi"))
-        self.RH_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RF_FOOT_position.casadi"))
-        self.RF_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_position.casadi"))
+        self.LF_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_position.casadi"))
+        self.LH_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_position.casadi"))
+        self.RH_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_position.casadi"))
+        self.RF_FOOT_position_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_attitude.casadi"))
-        self.LF_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LH_FOOT_attitude.casadi"))
-        self.LH_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RH_FOOT_attitude.casadi"))
-        self.RH_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RF_FOOT_attitude.casadi"))
-        self.RF_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_attitude.casadi"))
+        self.LF_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_attitude.casadi"))
+        self.LH_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_attitude.casadi"))
+        self.RH_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_attitude.casadi"))
+        self.RF_FOOT_attitude_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_jacobian.casadi"))
-        self.LF_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LH_FOOT_jacobian.casadi"))
-        self.LH_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RH_FOOT_jacobian.casadi"))
-        self.RH_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RF_FOOT_jacobian.casadi"))
-        self.RF_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_jacobian.casadi"))
+        self.LF_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_jacobian.casadi"))
+        self.LH_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_jacobian.casadi"))
+        self.RH_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_jacobian.casadi"))
+        self.RF_FOOT_jacobian_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LF_FOOT_velocity.casadi"))
-        self.LF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_LH_FOOT_velocity.casadi"))
-        self.LH_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RH_FOOT_velocity.casadi"))
-        self.RH_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
-        kinematic_casadi = casadi.Function.load(os.path.join(CUSADI_FUNCTION_DIR, "anymal_example_RF_FOOT_velocity.casadi"))
-        self.RF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_jacobian_world.casadi"))
+        self.LF_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_jacobian_world.casadi"))
+        self.LH_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_jacobian_world.casadi"))
+        self.RH_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_jacobian_world.casadi"))
+        self.RF_FOOT_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_velocity.casadi"))
+        self.LF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_velocity.casadi"))
+        self.LH_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_velocity.casadi"))
+        self.RH_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_velocity.casadi"))
+        self.RF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
     def getPosition(self, x0, u0, __name__):
         # support center-of-mass query
@@ -92,7 +137,14 @@ class Model_Cusadi:
             arr = np.asarray(position)
         except Exception:
             arr = position
-        return torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,)
+        
+        pos_tensor = torch.as_tensor(arr, device=self.device, dtype=self.dtype).reshape(3,)
+        
+        # Apply COM offset compensation for COM frame to match placo behavior
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            pos_tensor = pos_tensor - self.COM_OFFSET
+        
+        return pos_tensor
 
     def getAttitude(self, x0, u0, __name__):
         if __name__.lower() in ("com", "centroid", "center_of_mass"):
@@ -143,6 +195,29 @@ class Model_Cusadi:
             raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
 
         return jacobian
+
+    def getJacobian_world(self, x0, u0, __name__):
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_jacobian_world_cusadi', None) is None:
+                raise RuntimeError("CoM jacobian world cusadi function not available")
+            self.CoM_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.CoM_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
+            self.LF_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.LF_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "LH_FOOT":
+            self.LH_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.LH_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "RH_FOOT":
+            self.RH_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.RH_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        elif __name__ == "RF_FOOT":
+            self.RF_FOOT_jacobian_world_cusadi.evaluate((x0, u0))
+            jacobian_world = self.RF_FOOT_jacobian_world_cusadi.getDenseOutput(0)
+        else:
+            raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
+
+        return jacobian_world
 
     def getVelocity(self, x0, u0, __name__):
         if __name__.lower() in ("com", "centroid", "center_of_mass"):

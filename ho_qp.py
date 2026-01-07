@@ -15,7 +15,10 @@ The API follows the C++ class closely: Task, HoQp with similar getters.
 """
 from typing import Optional
 import torch
-from wbc_ik_qp.ik import *
+# debug
+import math
+# end debug
+from ik import *
 
 
 class Task:
@@ -108,6 +111,10 @@ class HoQp:
         # Store the task weight for this level
         self.task_weight_ = task_weight
 
+        # debug (optional): populated during solve for logging/diagnostics
+        self._debug_last_ = {}
+        # end
+
         # Will be set during initialization
         self.init_vars()
         self.build_z_matrix()  # Build nullspace first to determine correct dimensions
@@ -115,6 +122,22 @@ class HoQp:
         self.formulate_problem()
         self.solve_problem()
         self.stack_slack_solutions()
+    # debug getters
+    def get_last_debug(self):
+        """Return a dict of lightweight debug scalars for this HoQp level.
+
+        Keys are stable and designed for CSV logging.
+        """
+        return getattr(self, '_debug_last_', {})
+
+    def get_debug_chain(self):
+        """Return list of debug dicts from highest priority to this level."""
+        chain = []
+        if self.higher_problem_ is not None:
+            chain.extend(self.higher_problem_.get_debug_chain())
+        chain.append(self.get_last_debug())
+        return chain
+    # end
 
     # Public getters matching C++ naming
     def getStackedZMatrix(self):
@@ -197,18 +220,18 @@ class HoQp:
                         for i, dof_idx in enumerate(free_indices):
                             self.stacked_z_prev_[dof_idx, i] = 1.0
                         
-                        print(f'init_vars: preserved DOF mapping nullspace, {num_free_dof} free DOF out of {n}')
-                        print(f'Used DOF: {torch.nonzero(used_dof, as_tuple=True)[0].tolist()}')
-                        print(f'Free DOF: {free_indices.tolist()}')
+                        # #print(f'init_vars: preserved DOF mapping nullspace, {num_free_dof} free DOF out of {n}')
+                        # #print(f'Used DOF: {torch.nonzero(used_dof, as_tuple=True)[0].tolist()}')
+                        # #print(f'Free DOF: {free_indices.tolist()}')
                         
                         # Save the free DOF indices for use in build_z_matrix
                         self.free_dof_from_prev = free_indices.tolist()
                     else:
                         # All DOF are constrained by higher priority
                         self.stacked_z_prev_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
-                        print(f'init_vars: higher tasks use all DOF, no nullspace')
+                        #print(f'init_vars: higher tasks use all DOF, no nullspace')
                 except Exception as e:
-                    print(f'DOF-preserving nullspace computation failed: {e}, falling back to QR')
+                    #print(f'DOF-preserving nullspace computation failed: {e}, falling back to QR')
                     # Fallback to original QR method
                     mat = higher_tasks.a_
                     Q, R = torch.linalg.qr(mat.T, mode='complete') 
@@ -222,7 +245,7 @@ class HoQp:
                 # No constraints from higher problem, use full space
                 n = max(t.a_.shape[1] if t.a_.numel() else 0, t.d_.shape[1] if t.d_.numel() else 0)
                 self.stacked_z_prev_ = torch.eye(n, device=self.device, dtype=self.dtype)
-                print(f'init_vars: no higher constraints, using identity matrix {n}x{n}')
+                #print(f'init_vars: no higher constraints, using identity matrix {n}x{n}')
 
             # num_decision_vars_ should reflect the space we can actually optimize in.
             # If stacked_z_prev_ has zero columns, we'll later use regularization, so
@@ -389,6 +412,12 @@ class HoQp:
 
     def build_z_matrix(self):
         # Build stacked_z_ matrix for hierarchical QP nullspace projection
+        # default: rank may be unavailable depending on branch
+        try:
+            if 'A_proj_rank' not in self._debug_last_:
+                self._debug_last_['A_proj_rank'] = float('nan')
+        except Exception:
+            pass
         if self.has_eq_constraints_:
             assert self.task_.a_.shape[1] > 0
             
@@ -397,7 +426,14 @@ class HoQp:
             if self.higher_problem_ is None:
                 n = self.task_.a_.shape[1]
                 self.stacked_z_ = torch.eye(n, device=self.device, dtype=self.dtype)
-                print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
+                # debug: nullspace dim for this (standalone) level
+                try:
+                    self._debug_last_['null_prev_dim'] = float(self.stacked_z_prev_.shape[1])
+                    self._debug_last_['null_dim'] = float(self.stacked_z_.shape[1])
+                except Exception:
+                    pass
+                # end
+                # #print(f'build_z_matrix: standalone problem, using full identity matrix {n}x{n}')
                 return
             
             # For hierarchical problems, we need to compute the nullspace correctly
@@ -407,7 +443,14 @@ class HoQp:
                 # Use the task's own DOF as the active space
                 n = self.task_.a_.shape[1]
                 self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
-                print(f'build_z_matrix: no nullspace from higher priority, empty nullspace')
+                # debug: nullspace dim for this level
+                try:
+                    self._debug_last_['null_prev_dim'] = float(self.stacked_z_prev_.shape[1])
+                    self._debug_last_['null_dim'] = float(self.stacked_z_.shape[1])
+                except Exception:
+                    pass
+                # end
+                #print(f'build_z_matrix: no nullspace from higher priority, empty nullspace')
                 return
                 
             # Compute nullspace while preserving DOF structure
@@ -421,7 +464,14 @@ class HoQp:
                 if A_proj.shape[0] == 0 or A_proj.shape[1] == 0:
                     # No constraints or no previous free DOF
                     self.stacked_z_ = self.stacked_z_prev_
-                    print('build_z_matrix: no projected constraints, using previous nullspace')
+                    # debug: nullspace dim for this level
+                    try:
+                        self._debug_last_['null_prev_dim'] = float(self.stacked_z_prev_.shape[1])
+                        self._debug_last_['null_dim'] = float(self.stacked_z_.shape[1])
+                    except Exception:
+                        pass
+                    # end
+                    #print('build_z_matrix: no projected constraints, using previous nullspace')
                     return
                     
                 # Use QR decomposition for stable nullspace computation
@@ -436,7 +486,7 @@ class HoQp:
                         break
                         
                 free_dofs = A_proj.shape[1] - rank
-                print(f'build_z_matrix: QR nullspace with {free_dofs} free DOF (rank={rank})')
+                # #print(f'build_z_matrix: QR nullspace with {free_dofs} free DOF (rank={rank})')
                 
                 if free_dofs > 0:
                     # Nullspace basis in the reduced space
@@ -447,10 +497,18 @@ class HoQp:
                     # Current task fully constrains remaining DOF
                     n = self.task_.a_.shape[1]
                     self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
-                    print('build_z_matrix: current task fully constrains remaining space')
+                    # #print('build_z_matrix: current task fully constrains remaining space')
+                # debug: nullspace dim for this level
+                try:
+                    self._debug_last_['null_prev_dim'] = float(self.stacked_z_prev_.shape[1])
+                    self._debug_last_['null_dim'] = float(self.stacked_z_.shape[1])
+                    self._debug_last_['A_proj_rank'] = float(rank)
+                except Exception:
+                    pass
+                # end
                     
             except Exception as e:
-                print(f'build_z_matrix: QR decomposition failed: {e}, using fallback')
+                #print(f'build_z_matrix: QR decomposition failed: {e}, using fallback')
                 # Fallback: no nullspace
                 n = self.task_.a_.shape[1]
                 self.stacked_z_ = torch.zeros((n, 0), device=self.device, dtype=self.dtype)
@@ -458,6 +516,13 @@ class HoQp:
         else:
             # No constraints, use previous nullspace directly
             self.stacked_z_ = self.stacked_z_prev_
+            # debug: nullspace dim for this level
+            try:
+                self._debug_last_['null_prev_dim'] = float(self.stacked_z_prev_.shape[1])
+                self._debug_last_['null_dim'] = float(self.stacked_z_.shape[1])
+            except Exception:
+                pass
+            # end
 
     def solve_problem(self):
         """Solve the QP z = [decision_vars; slack_vars].
@@ -514,10 +579,74 @@ class HoQp:
             except RuntimeError:
                 z = -torch.matmul(torch.linalg.pinv(H + reg * torch.eye(H.shape[0], device=device, dtype=dtype)), g)
 
+        # Save solution pieces first so downstream debug computations (like residuals)
+        # can safely call getSolutions() without relying on uninitialized fields.
         nx = self.num_decision_vars_
         nv = self.num_slack_vars_
         self.decision_vars_solutions_ = z[:nx].to(device=device, dtype=dtype)
         self.slack_vars_solutions_ = z[nx: nx + nv].to(device=device, dtype=dtype) if nv > 0 else torch.zeros(0, device=device, dtype=dtype)
+
+        # ---- debug scalars (Hessian conditioning etc.)
+        try:
+            self._debug_last_['debug_error'] = 0.0
+            # symmetric part for eig/SVD (numerical safety)
+            Hs = 0.5 * (H + H.T)
+            # Prefer eigenvalues for small problems; fall back to SVD otherwise.
+            n = int(Hs.shape[0])
+            self._debug_last_['qp_dim'] = float(n)
+            if n > 0:
+                if n <= 128:
+                    evals = torch.linalg.eigvalsh(Hs)
+                    lmin = torch.min(evals).real
+                    lmax = torch.max(evals).real
+                    self._debug_last_['H_min_eig'] = float(lmin.detach().cpu())
+                    # cond for SPD-ish matrices; if ill-posed, allow inf
+                    denom = (lmin.abs() + 1e-18)
+                    self._debug_last_['H_cond'] = float((lmax.abs() / denom).detach().cpu())
+                else:
+                    # approx via singular values
+                    s = torch.linalg.svdvals(Hs)
+                    smin = torch.min(s)
+                    smax = torch.max(s)
+                    self._debug_last_['H_min_eig'] = float(smin.detach().cpu())
+                    self._debug_last_['H_cond'] = float((smax / (smin + 1e-18)).detach().cpu())
+        except Exception:
+            try:
+                self._debug_last_['debug_error'] = 1.0
+            except Exception:
+                pass
+            pass
+
+        # ---- task residuals (this level and stacked)
+        try:
+            x_full = self.getSolutions()
+            if self.task_.a_.numel() > 0 and self.task_.a_.shape[0] > 0:
+                r = self.task_.a_ @ x_full - self.task_.b_
+                self._debug_last_['res_task_norm'] = float(torch.linalg.norm(r).detach().cpu())
+                self._debug_last_['res_task_rms'] = float((torch.linalg.norm(r) / math.sqrt(max(1, r.numel()))).detach().cpu())
+                self._debug_last_['res_task_dim'] = float(r.numel())
+            else:
+                self._debug_last_['res_task_norm'] = 0.0
+                self._debug_last_['res_task_rms'] = 0.0
+                self._debug_last_['res_task_dim'] = 0.0
+
+            st = self.getStackedTasks()
+            if st.a_.numel() > 0 and st.a_.shape[0] > 0:
+                rs = st.a_ @ x_full - st.b_
+                self._debug_last_['res_stacked_norm'] = float(torch.linalg.norm(rs).detach().cpu())
+                self._debug_last_['res_stacked_rms'] = float((torch.linalg.norm(rs) / math.sqrt(max(1, rs.numel()))).detach().cpu())
+                self._debug_last_['res_stacked_dim'] = float(rs.numel())
+            else:
+                self._debug_last_['res_stacked_norm'] = 0.0
+                self._debug_last_['res_stacked_rms'] = 0.0
+                self._debug_last_['res_stacked_dim'] = 0.0
+        except Exception:
+            try:
+                self._debug_last_['debug_error'] = 1.0
+            except Exception:
+                pass
+            pass
+        # ---- end debug scalars
 
         # store for access
         self.qp_solution_ = z.to(device=device, dtype=dtype)
@@ -551,4 +680,4 @@ if __name__ == '__main__':
     f = torch.randn((mineq,), device=dev, dtype=dtype)
     t = Task(a=a, b=b, d=d, f=f, device=dev, dtype=dtype)
     h = HoQp(t, device=dev, dtype=dtype)
-    print('HoQp solved. solution length:', h.qp_solution_.shape[0])
+    #print('HoQp solved. solution length:', h.qp_solution_.shape[0])

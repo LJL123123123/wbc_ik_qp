@@ -1,0 +1,30 @@
+From swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvidia/cuda:12.8.0-base-ubuntu24.04
+
+
+#base-env
+RUN sed -i "s@http://.*archive.ubuntu.com@https://mirrors.sustech.edu.cn@g" /etc/apt/sources.list && sed -i "s@http://.*archive.ubuntu.com@https://mirrors.sustech.edu.cn@g" /etc/apt/sources.list
+RUN apt-get update && apt update
+RUN apt install git python3-venv python3-full iputils-ping curl unzip pip -y 
+
+#poject-env
+RUN python3 -m venv ~/.venv/cusadi 
+ENV PATH=/root/.venv/cusadi/bin:$PATH
+
+#git clone https://github.com/se-hwan/cusadi.git && git clone https://github.com/RoboticExplorationLab/ReLUQP-py.git
+COPY ./cusadi-main.zip /home
+COPY ./ReLUQP-py-main.zip /home
+
+WORKDIR /home
+RUN unzip cusadi-main.zip && rm /home/cusadi-main/src/CusadiFunction.py && unzip ./ReLUQP-py-main.zip 
+RUN pip install ischedule mashcat scipy
+COPY ./CusadiFunction.py /home/cusadi-main/src/
+
+WORKDIR /home/cusadi-main/
+pip install -e .
+
+WORKDIR /home/ReLUQP-py-main/
+RUN  pip install -e .
+
+COPY ./cusadi_build /home
+
+

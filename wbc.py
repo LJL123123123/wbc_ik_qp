@@ -17,21 +17,40 @@ from typing import Optional, Sequence
 import torch
 import math
 
+from pathlib import Path
+
+from wbc_logger import WbcCsvLogger
+from gait_manager_cuda import GaitCycleManagerCuda, GaitParamsCuda
+
 
 try:
     from ho_qp import Task, HoQp
 except Exception:
-    # If running as package, try relative import
-    from .ho_qp import Task, HoQp
+    # If running as a plain script (e.g. `python run_wbc.py`), relative imports
+    # fail with "no known parent package". Prefer retrying absolute import after
+    # ensuring this directory is on sys.path.
+    try:
+        from .ho_qp import Task, HoQp
+    except Exception:
+        import os
+        import sys
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from ho_qp import Task, HoQp
 
 from Centroidal import CentroidalModelInfoSimple
 from task.position_task import PositionTask
 from task.orientation_task import OrientationTask
+from task.base_constraint_task import BaseConstraintTask
+from ik import Model_Cusadi
 
 @dataclass
 class WbcTask:
     position: PositionTask
     orientation: OrientationTask
+    base_constraint: BaseConstraintTask
 
 class FakePinocchioModel:
     def __init__(self, nq: int):
@@ -103,6 +122,18 @@ class Wbc:
         self.pino = pino_interface
         self.info = info
         self.ee_kinematics = ee_kinematics
+
+        self.verbose = verbose
+
+        # --- gait cycle manager (CUDA-friendly) ---
+        self.gait = GaitCycleManagerCuda(
+            device=self.device,
+            dtype=self.dtype,
+            params=GaitParamsCuda(),
+        )
+
+        # --- CSV logger (centralized in WBC) ---
+        self.logger = WbcCsvLogger(base_dir=Path('./debug'))
         # decision vars: [u_dot (nq) ; contact_forces (3*numContacts) ; tau (act)]
         self.num_decision_vars = (
             info.generalizedCoordinatesNum + 3 * info.numThreeDofContacts + info.actuatedDofNum
@@ -122,15 +153,11 @@ class Wbc:
         self.friction_coeff_ = 0.6
         self.swing_kp_ = 50.0
         self.swing_kd_ = 1.0
+        self.robot = Model_Cusadi(info, device=self.device, dtype=self.dtype)
 
-        # Construct a PositionTask for a representative frame. The project's
-        # PositionTask implementation expects (info, frame_name, target_world,
-        # device, dtype) and will fall back to a minimal robot if the full
-        # kinematic backend is not available. We choose a foot frame name by
-        # convention; users can override after Wbc construction if desired.
         try:
             self.com_PositionTask = PositionTask(
-                info,
+                self.info,
                 frame_name='com',
                 device=self.device,
                 dtype=self.dtype,
@@ -140,17 +167,17 @@ class Wbc:
             self.com_PositionTask = None
         try:
             self.com_OrientationTask = OrientationTask(
-                info,
+                self.info,
                 frame_name='com',
                 device=self.device,
                 dtype=self.dtype,
             )
         except Exception:
-            print("Failed to create com_PositionTask, setting to None.")
-            self.com_PositionTask = None
+            print("Failed to create com_OrientationTask, setting to None.")
+            self.com_OrientationTask = None
         try:
             self.LF_PositionTask = PositionTask(
-                info,
+                self.info,
                 frame_name='LF_FOOT',
                 device=self.device,
                 dtype=self.dtype,
@@ -158,9 +185,10 @@ class Wbc:
         except Exception:
             print("Failed to create LF_PositionTask, setting to None.")
             self.LF_PositionTask = None
-        try:
+        try:        # print('\n--- ho1 (LF standalone) diagnostic ---')
+
             self.LH_PositionTask = PositionTask(
-                info,
+                self.info,
                 frame_name='LH_FOOT',
                 device=self.device,
                 dtype=self.dtype,
@@ -170,7 +198,7 @@ class Wbc:
             self.LH_PositionTask = None
         try:
             self.RF_PositionTask = PositionTask(
-                info,
+                self.info,
                 frame_name='RF_FOOT',
                 device=self.device,
                 dtype=self.dtype,
@@ -180,7 +208,7 @@ class Wbc:
             self.RF_PositionTask = None
         try:
             self.RH_PositionTask = PositionTask(
-                info,
+                self.info,
                 frame_name='RH_FOOT',
                 device=self.device,
                 dtype=self.dtype,
@@ -188,6 +216,43 @@ class Wbc:
         except Exception:
             print("Failed to create RH_PositionTask, setting to None.")
             self.RH_PositionTask = None
+        self.target_pos = {
+            "com": torch.tensor([0.0, 0., 0.0], device=self.device, dtype=self.dtype),
+            "LH": torch.tensor([-0.44, 0.27, -0.55], device=self.device, dtype=self.dtype),
+            "LF": torch.tensor([0.44, 0.27, -0.55], device=self.device, dtype=self.dtype),
+            "RF": torch.tensor([0.44, -0.27, -0.55], device=self.device, dtype=self.dtype),
+            "RH": torch.tensor([-0.44, -0.27, -0.55], device=self.device, dtype=self.dtype),
+        }
+
+        self.target_ori = {
+            "com": torch.eye(3, device=self.device, dtype=self.dtype),
+            "LH": torch.eye(3, device=self.device, dtype=self.dtype),
+            "LF": torch.eye(3, device=self.device, dtype=self.dtype),
+            "RF": torch.eye(3, device=self.device, dtype=self.dtype),
+            "RH": torch.eye(3, device=self.device, dtype=self.dtype),
+        }
+
+        try:
+            # BaseConstraintTask expects (info, device, dtype)
+            # (do not pass `self` here; that caused a signature mismatch)
+            self.base_constraint = BaseConstraintTask(
+                self.info,
+                device=self.device,
+                dtype=self.dtype,
+            )
+        except Exception:
+            print("Failed to create base_constraint, setting to None.")
+            self.base_constraint = None
+
+        # internal time for gait manager & logging
+        self._t = 0.0
+
+        # last planned targets snapshot (for logging)
+        self._last_plan = None
+
+        # last solution snapshot
+        self._last_sol = None
+
 
     # ----------------- Task builders -----------------
     def formulateFloatingBaseEomTask(self) -> Task:
@@ -279,175 +344,427 @@ class Wbc:
         return Task()
 
     # ----------------- Public API -----------------
-    def update(self, state_desired: Sequence[float], input_desired: Sequence[float],
-               measured_rbd_state: Sequence[float], mode: int):
-        """Main update call that returns the stacked HoQp solution vector.
+    def update_targets(self, target_pos: dict, target_ori: dict):
+        """Update target positions and orientations for tasks.
 
+        Args:
+            target_pos: dict mapping frame names to target position tensors (3,)
+            target_ori: dict mapping frame names to target orientation tensors (3,3)
+        """
+        self.target_pos = target_pos
+        self.target_ori = target_ori
+
+    def _log_series(self, t: float, sol: torch.Tensor):
+        """Write CSV rows for planned targets, solver output, and kinematic state.
+
+        This is intentionally lightweight; we log a minimal subset matching the
+        original run_wbc.py debug outputs.
+        """
+
+        # planned targets
+        tp = self.target_pos
+        to = self.target_ori
+
+        # COM target (pos + euler from R)
+        Rcom = to['com']
+        # simple XYZ euler extraction without scipy
+        # (matches typical roll-pitch-yaw for rotation matrix)
+        sy = torch.sqrt(Rcom[0, 0] * Rcom[0, 0] + Rcom[1, 0] * Rcom[1, 0])
+        singular = sy < 1e-9
+        if not bool(singular.item()):
+            roll = torch.atan2(Rcom[2, 1], Rcom[2, 2])
+            pitch = torch.atan2(-Rcom[2, 0], sy)
+            yaw = torch.atan2(Rcom[1, 0], Rcom[0, 0])
+        else:
+            roll = torch.atan2(-Rcom[1, 2], Rcom[1, 1])
+            pitch = torch.atan2(-Rcom[2, 0], sy)
+            yaw = torch.zeros((), device=self.device, dtype=self.dtype)
+
+        self.logger.write_row(
+            name='com_target',
+            filename='com_target_data.csv',
+            header=['t', 'com_x', 'com_y', 'com_z', 'roll', 'pitch', 'yaw'],
+            row=[
+                float(t),
+                float(tp['com'][0].detach().cpu()),
+                float(tp['com'][1].detach().cpu()),
+                float(tp['com'][2].detach().cpu()),
+                float(roll.detach().cpu()),
+                float(pitch.detach().cpu()),
+                float(yaw.detach().cpu()),
+            ],
+        )
+
+        # RF target
+        self.logger.write_row(
+            name='rf_target',
+            filename='RF_target_data.csv',
+            header=['t', 'x', 'y', 'z'],
+            row=[
+                float(t),
+                float(tp['RF'][0].detach().cpu()),
+                float(tp['RF'][1].detach().cpu()),
+                float(tp['RF'][2].detach().cpu()),
+            ],
+        )
+
+        # solver "optimal" outputs (kept consistent with old script slices)
+        if sol is not None and sol.numel() >= 3:
+            self.logger.write_row(
+                name='com_optimal',
+                filename='com_opimal_data.csv',
+                header=['t', 'dx', 'dy', 'dz'],
+                row=[
+                    float(t),
+                    float(sol[0].detach().cpu()),
+                    float(sol[1].detach().cpu()),
+                    float(sol[2].detach().cpu()),
+                ],
+            )
+        if sol is not None and sol.numel() >= 10:
+            self.logger.write_row(
+                name='rf_optimal',
+                filename='RF_opimal_data.csv',
+                header=['t', 'dx', 'dy', 'dz'],
+                row=[
+                    float(t),
+                    float(sol[7].detach().cpu()),
+                    float(sol[8].detach().cpu()),
+                    float(sol[9].detach().cpu()),
+                ],
+            )
+
+        # state (from info, if available)
+        try:
+            st = self.info.getstate()
+            it = self.info.getinput()
+            # state assumed to start with COM position
+            # and contain base orientation quaternion at indices [3:7] as (x,y,z,w)
+            # (per user's CentroidalModelInfoSimple usage)
+            qx, qy, qz, qw = st[3], st[4], st[5], st[6]
+            # quaternion (x,y,z,w) -> roll/pitch/yaw (XYZ, intrinsic RPY)
+            sinr_cosp = 2.0 * (qw * qx + qy * qz)
+            cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+            roll_s = torch.atan2(sinr_cosp, cosr_cosp)
+
+            sinp = 2.0 * (qw * qy - qz * qx)
+            # clamp for numerical stability
+            sinp = torch.clamp(sinp, -1.0, 1.0)
+            pitch_s = torch.asin(sinp)
+
+            siny_cosp = 2.0 * (qw * qz + qx * qy)
+            cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+            yaw_s = torch.atan2(siny_cosp, cosy_cosp)
+
+            self.logger.write_row(
+                name='com_state',
+                filename='com_state_data.csv',
+                header=['t', 'com_x', 'com_y', 'com_z', 'roll', 'pitch', 'yaw'],
+                row=[
+                    float(t),
+                    float(st[0].detach().cpu()),
+                    float(st[1].detach().cpu()),
+                    float(st[2].detach().cpu()),
+                    float(roll_s.detach().cpu()),
+                    float(pitch_s.detach().cpu()),
+                    float(yaw_s.detach().cpu()),
+                ],
+            )
+            
+            rf_state = self.robot.getPosition( st, it, "RF_FOOT")
+
+            self.logger.write_row(
+                name='rf_state',
+                filename='RF_state_data.csv',
+                header=['t', 'x', 'y', 'z'],
+                row=[
+                    float(t),
+                    float(rf_state[0].detach().cpu()),
+                    float(rf_state[1].detach().cpu()),
+                    float(rf_state[2].detach().cpu()),
+                ],
+            )
+        except Exception:
+            pass
+        
+        #  error logs
+        try:
+            com_ori_error = self.com_OrientationTask.error
+            self.logger.write_row(
+                name='com_ori_error',
+                filename='com_ori_error_data.csv',
+                header=['t', 'err_x', 'err_y', 'err_z'],
+                row=[
+                    float(t),
+                    float(com_ori_error[0].detach().cpu()),
+                    float(com_ori_error[1].detach().cpu()),
+                    float(com_ori_error[2].detach().cpu()),
+                ],
+            )
+
+            rf_ori_error = self.RF_PositionTask.error
+            self.logger.write_row(
+                name='rf_error',
+                filename='RF_error_data.csv',
+                header=['t', 'err_x', 'err_y', 'err_z'],
+                row=[
+                    float(t),
+                    float(rf_ori_error[0].detach().cpu()),
+                    float(rf_ori_error[1].detach().cpu()),
+                    float(rf_ori_error[2].detach().cpu()),
+                ],
+            )
+        except Exception:
+            pass
+
+    def step_with_cmd(
+        self,
+        measured_rbd_state: torch.Tensor,
+        input_desired: torch.Tensor,
+        dt: float,
+        cmd_vxyz: torch.Tensor,
+        cmd_yaw_rate: torch.Tensor,
+        mode: int = 0,
+    ) -> torch.Tensor:
+        """High level step: gait planning -> update targets -> solve -> log.
+
+        Returns:
+            state_desired (same shape as measured_rbd_state)
+        """
+
+        self._t += float(dt)
+
+        # plan new targets
+        plan = self.gait.update(
+            t=self._t,
+            target_pos=self.target_pos,
+            target_ori=self.target_ori,
+            cmd_vxyz=cmd_vxyz,
+            cmd_yaw_rate=cmd_yaw_rate,
+            dt=dt,
+        )
+        self._last_plan = plan
+        self.update_targets(plan.target_pos, plan.target_ori)
+
+        # solve
+        sol = self.update(measured_rbd_state, input_desired, mode=mode)
+        self._last_sol = sol
+
+        # apply solution to construct desired next state (keep old behavior)
+        state_desired = measured_rbd_state.clone()
+        if sol is not None and sol.numel() >= 18:
+            # ---- per-step norms diagnostics (sol/dp/dq)
+            try:
+                dp = sol[0:3]
+                dq = sol[6:18]
+                self.logger.write_row(
+                    name='step_norms',
+                    filename='step_norms_data.csv',
+                    header=['t', 'sol_norm', 'dp_norm', 'dq_norm'],
+                    row=[
+                        float(self._t),
+                        float(torch.linalg.norm(sol).detach().cpu()),
+                        float(torch.linalg.norm(dp).detach().cpu()),
+                        float(torch.linalg.norm(dq).detach().cpu()),
+                    ],
+                )
+            except Exception:
+                pass
+
+            state_desired[0:3] = measured_rbd_state[0:3] + sol[0:3]
+            # base orientation update: treat sol[3:6] as small-angle rotation vector (phi)
+            # and integrate it into quaternion state_desired[3:7] (x,y,z,w).
+            try:
+                if measured_rbd_state.numel() >= 7 and sol.numel() >= 6:
+                    # NOTE:
+                    # In this codebase, `sol` is produced by HoQp from kinematic tasks.
+                    # It behaves like an increment per-step, but its absolute scale can
+                    # drift when the optimization becomes ill-conditioned.
+                    # We therefore:
+                    # 1) scale by dt (treat as angular velocity-like increment)
+                    # 2) clamp magnitude to avoid a single bad solve exploding the state
+                    phi = sol[3:6]
+                    # clamp to at most ~10 deg per step (tunable)
+                    phi_norm = torch.linalg.norm(phi)
+                    phi_max = torch.tensor(0.17453292519943295, device=phi.device, dtype=phi.dtype)  # 10 deg
+                    if phi_norm > phi_max:
+                        phi = phi * (phi_max / (phi_norm + 1e-12))
+
+                    angle = torch.linalg.norm(phi)
+                    # small-angle stable conversion
+                    half = 0.5 * angle
+                    axis = phi / (angle + 1e-12)
+                    sin_half = torch.sin(half)
+                    dq = torch.stack([axis[0] * sin_half, axis[1] * sin_half, axis[2] * sin_half, torch.cos(half)])
+
+                    q = measured_rbd_state[3:7]
+                    # Hamilton product q_new = dq ⊗ q
+                    qx, qy, qz, qw = dq[0], dq[1], dq[2], dq[3]
+                    rx, ry, rz, rw = q[0], q[1], q[2], q[3]
+                    vx = qw * rx + rw * qx + (qy * rz - qz * ry)
+                    vy = qw * ry + rw * qy + (qz * rx - qx * rz)
+                    vz = qw * rz + rw * qz + (qx * ry - qy * rx)
+                    vw = qw * rw - (qx * rx + qy * ry + qz * rz)
+                    q_new = torch.stack([vx, vy, vz, vw])
+                    q_new = q_new / (torch.linalg.norm(q_new) + 1e-12)
+                    state_desired[3:7] = q_new
+
+                    # lightweight diagnostics for divergence hunting
+                    try:
+                        self.logger.write_row(
+                            name='sol_norm',
+                            filename='sol_norm_data.csv',
+                            header=['t', 'dp_norm', 'dphi_norm_raw', 'dphi_norm_used'],
+                            row=[
+                                float(self._t),
+                                float(torch.linalg.norm(sol[0:3]).detach().cpu()),
+                                float(torch.linalg.norm(sol[3:6]).detach().cpu()),
+                                float(torch.linalg.norm(phi).detach().cpu()),
+                            ],
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                # never let quaternion integration break the loop
+                pass
+            # joints slice consistent with run_wbc.py: state[7:19] += sol[6:18]
+            state_desired[7:19] = measured_rbd_state[7:19] + sol[6:18]
+
+        # keep info state updated so downstream kinematics can read it
+        try:
+            self.info.update_state_input(state_desired, input_desired)
+        except Exception:
+            pass
+
+        # log
+        try:
+            self._log_series(self._t, sol)
+        except Exception:
+            # never let logging break control loop
+            if self.verbose:
+                print('[WBC] logging failed (ignored).')
+
+        return state_desired
+
+    def update(self, measured_rbd_state: Sequence[float], input_desired: Sequence[float], mode: int):
+        """Main update call that returns the stacked HoQp solution vector.
+        
         The implementation here builds a few tasks (some are placeholders)
         and runs the Python HoQp stack to produce a solution vector compatible
         with the decision variable layout described in the header.
         """
-        # Convert inputs to torch tensors for potential use
+        
         device = self.device
         dtype = self.dtype
 
-        measured_rbd_state = torch.tensor([0., 0., 0., 0., 0., 0., 0.,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0], dtype=dtype)
-        input_desired = torch.tensor([0., 0., 0.0, 0., 0., 0.,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0,
-                                            0., 0., 0.0], dtype=dtype)
         self.info.update_state_input(
             measured_rbd_state,
             input_desired
         )
-        # Build tasks roughly following the C++ order
-        # Define task weights - higher priority tasks get higher weights
-        com_weight = 100.0   # High priority for COM position
-        lf_weight = 1000.0   # Increased weight for foot position to see more effect
+
+        com_weight = 1.0     # Base weight for COM position
+        lf_weight = 1.0      # Base weight for foot position
         
-        com_target_world = torch.tensor([0.0, 0., 0.0], device=device, dtype=dtype)
         task_com_pos = self.com_PositionTask.as_task(
-            target_world=com_target_world,
+            target_world=self.target_pos["com"],
             axises="xyz",
             frame="task",
             weight=com_weight
         )
-        # OrientationTask expects a 3x3 rotation matrix, not quaternion
-        com_target_attitude = torch.eye(3, device=device, dtype=dtype)  # Identity rotation matrix
         task_com_ori = self.com_OrientationTask.as_task(
-            target_attitude=com_target_attitude,
+            target_attitude=self.target_ori["com"],
             axises="xyz",
             frame="task",
             weight=com_weight
         )
-        LF_target_world = torch.tensor([0.1,0.5,-0.1], device=device, dtype=dtype)
+    # Combine COM position and orientation into the high-priority task so the
+    # optimizer actively tracks both position and attitude of the base.
+        task_com_frame =  task_com_pos + task_com_ori
+        # print('task_com_frame.a_:', task_com_frame.a_)
+        ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=100.0)
+
         task_LF_pos = self.LF_PositionTask.as_task(
-            target_world=LF_target_world,
+            target_world=self.target_pos["LF"],
             axises="xyz",
             frame="task",
             weight=lf_weight
         )
-        LH_target_world = torch.tensor([-0.1,0.5,-0.1], device=device, dtype=dtype)
         task_LH_pos = self.LH_PositionTask.as_task(
-            target_world=LH_target_world,
+            target_world=self.target_pos["LH"],
             axises="xyz",
             frame="task",
             weight=lf_weight
         )
-        RF_target_world = torch.tensor([0.1,-0.5,-0.2], device=device, dtype=dtype)
         task_RF_pos = self.RF_PositionTask.as_task(
-            target_world=RF_target_world,
+            target_world=self.target_pos["RF"],
             axises="xyz",
             frame="task",
             weight=lf_weight
         )
-        RH_target_world = torch.tensor([-0.1,-0.5,-0.1], device=device, dtype=dtype)
         task_RH_pos = self.RH_PositionTask.as_task(
-            target_world=RH_target_world,
+            target_world=self.target_pos["RH"],
             axises="xyz",
             frame="task",
             weight=lf_weight
         )
-        # Create nested hierarchical problems: task_com_pos is the higher (first) priority
-        # HoQp expects a Task and an optional higher_problem (HoQp). Construct the
-        # higher-priority problem first, then pass it as higher_problem to the
-        # lower-priority HoQp instance.
-        dev = device if device is not None else torch.device('cpu')
+        constraint = self.base_constraint.as_task(weight=.01)
+        high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
+        low_priority_weight = .1     # Reasonable weight for low priority tasks
+        ho_RF = HoQp(task_LF_pos, higher_problem=None, device=device, dtype=dtype, task_weight=high_priority_weight)
 
-        # Debug: show task shapes and some stats
-        print('task_com_pos.a_.shape =', task_com_pos.a_.shape, ' nonzero:', (task_com_pos.a_ != 0).sum().item())
-        print('task_LF_pos.a_.shape =', task_LF_pos.a_.shape, ' nonzero:', (task_LF_pos.a_ != 0).sum().item())
-        print('COM target error (b) =', task_com_pos.b_)
-        print('LF target error (b) =', task_LF_pos.b_)
+        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos + constraint
+        const_task = HoQp(constraint, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
+        # print('combined_foot_task.a_:', combined_foot_task.a_)
+        combine_foot_ho = HoQp(combined_foot_task, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
+        combined_ho = HoQp(task_com_frame, higher_problem=combine_foot_ho, device=device, dtype=dtype, task_weight=low_priority_weight)
+    # Return the full stacked solution so both high-priority (COM pos+ori)
+    # and lower-priority (foot positions) objectives are considered.
+        # Optionally add base constraint as the lowest-priority task on top of
+        # the existing stack.
 
-        # Define hierarchical weights for different priorities
-        high_priority_weight = 100.0   # High weight for high priority tasks
-        low_priority_weight = 100.0    # Increased weight for low priority tasks
-        
-        # Use only COM position task for high priority (matching placo behavior)
-        # placo COM task is only 3DOF position, no orientation component
-        com_frame_task = task_com_pos + task_com_ori
-        ho_high = HoQp(com_frame_task, higher_problem=None, device=dev, dtype=dtype, task_weight=high_priority_weight)
-        # Diagnostic prints for ho_high
-        print('\n--- ho_high diagnostic ---')
-        print('ho_high.num_decision_vars_ =', ho_high.num_decision_vars_)
-        print('ho_high.num_slack_vars_ =', ho_high.num_slack_vars_)
-        print('ho_high.has_eq_constraints_ =', ho_high.has_eq_constraints_)
-        print('ho_high.task_weight_ =', ho_high.task_weight_)
-        print('ho_high.task_.weight_ =', ho_high.task_.weight_)
-        print('ho_high.stacked_z_.shape =', ho_high.getStackedZMatrix().shape)
-        print('ho_high.h_.shape =', ho_high.h_.shape)
-        print('ho_high.c_.shape =', ho_high.c_.shape)
-        print('ho_high.getSolutions() =', ho_high.getSolutions())
+        sol = combined_ho.getSolutions()
 
-        ho0 = HoQp(task_LH_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- ho0 (LH standalone) diagnostic ---')
-        print('ho0.num_decision_vars_ =', ho0.num_decision_vars_)
-        print('ho0.task_weight_ =', ho0.task_weight_)
-        print('ho0.task_.weight_ =', ho0.task_.weight_)
-        print('ho0.stacked_z_.shape =', ho0.getStackedZMatrix().shape)
-        print('ho0.h_.shape =', ho0.h_.shape)
-        print('ho0.c_.shape =', ho0.c_.shape)
-        print('ho0.getSolutions() =', ho0.getSolutions())
+        # ---- HoQp debug chain (Hessian conditioning, residual norms, nullspace dims)
+        try:
+            chain = combined_ho.get_debug_chain() if hasattr(combined_ho, 'get_debug_chain') else []
+            # Each entry corresponds to one HoQp level from high->low.
+            # We log a compact per-level line for post-mortem analysis.
+            for lvl, dbg in enumerate(chain):
+                if not isinstance(dbg, dict) or len(dbg) == 0:
+                    continue
 
-        ho1 = HoQp(task_LF_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- ho1 (LF standalone) diagnostic ---')
-        print('ho1.num_decision_vars_ =', ho1.num_decision_vars_)
-        print('ho1.task_weight_ =', ho1.task_weight_)
-        print('ho1.task_.weight_ =', ho1.task_.weight_)
-        print('ho1.stacked_z_.shape =', ho1.getStackedZMatrix().shape)
-        print('ho1.h_.shape =', ho1.h_.shape)
-        print('ho1.c_.shape =', ho1.c_.shape)
-        print('ho1.getSolutions() =', ho1.getSolutions())
+                # stable columns; missing keys become NaN
+                def _get(key, default=float('nan')):
+                    v = dbg.get(key, default)
+                    try:
+                        return float(v)
+                    except Exception:
+                        return default
 
-        ho2 = HoQp(task_RH_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- ho2 (RH standalone) diagnostic ---')
-        print('ho2.num_decision_vars_ =', ho2.num_decision_vars_)
-        print('ho2.task_weight_ =', ho2.task_weight_)
-        print('ho2.task_.weight_ =', ho2.task_.weight_)
-        print('ho2.stacked_z_.shape =', ho2.getStackedZMatrix().shape)
-        print('ho2.h_.shape =', ho2.h_.shape)
-        print('ho2.c_.shape =', ho2.c_.shape)
-        print('ho2.getSolutions() =', ho2.getSolutions())
+                self.logger.write_row(
+                    name=f'hoqp_debug_lvl{lvl}',
+                    filename='hoqp_debug_data.csv',
+                    header=[
+                        't', 'level',
+                        'qp_dim', 'H_cond', 'H_min_eig',
+                        'res_task_norm', 'res_task_rms', 'res_task_dim',
+                        'res_stacked_norm', 'res_stacked_rms', 'res_stacked_dim',
+                        'null_prev_dim', 'null_dim', 'A_proj_rank',
+                        'debug_error',
+                    ],
+                    row=[
+                        float(self._t), float(lvl),
+                        _get('qp_dim'), _get('H_cond'), _get('H_min_eig'),
+                        _get('res_task_norm'), _get('res_task_rms'), _get('res_task_dim'),
+                        _get('res_stacked_norm'), _get('res_stacked_rms'), _get('res_stacked_dim'),
+                        _get('null_prev_dim'), _get('null_dim'), _get('A_proj_rank'),
+                        _get('debug_error', 0.0),
+                    ],
+                )
+        except Exception:
+            pass
 
-        ho3 = HoQp(task_RF_pos, None, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- ho3 (RF standalone) diagnostic ---')
-        print('ho3.num_decision_vars_ =', ho3.num_decision_vars_)
-        print('ho3.task_weight_ =', ho3.task_weight_)
-        print('ho3.task_.weight_ =', ho3.task_.weight_)
-        print('ho3.stacked_z_.shape =', ho3.getStackedZMatrix().shape)
-        print('ho3.h_.shape =', ho3.h_.shape)
-        print('ho3.c_.shape =', ho3.c_.shape)
-        print('ho3.getSolutions() =', ho3.getSolutions())
-
-        # Test LF_FOOT task to see if it appears in correct DOF indices (6,7,8)
-        combined_ho_LF = HoQp(task_LF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- combined_ho_LF (LF_FOOT) diagnostic ---')
-        print('LF combined.getSolutions() =', combined_ho_LF.getSolutions())
-        
-        # Test LH_FOOT task to see if it appears in correct DOF indices (9,10,11)  
-        combined_ho_LH = HoQp(task_LH_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- combined_ho_LH (LH_FOOT) diagnostic ---')
-        print('LH combined.getSolutions() =', combined_ho_LH.getSolutions())
-        
-        # Test RF_FOOT task to see if it appears in correct DOF indices (12,13,14)
-        combined_ho_RF = HoQp(task_RF_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- combined_ho_RF (RF_FOOT) diagnostic ---')
-        print('RF combined.getSolutions() =', combined_ho_RF.getSolutions())
-        
-        # Test RH_FOOT task to see if it appears in correct DOF indices (15,16,17)
-        combined_ho_RH = HoQp(task_RH_pos, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        print('\n--- combined_ho_RH (RH_FOOT) diagnostic ---')
-        print('RH combined.getSolutions() =', combined_ho_RH.getSolutions())
-
-        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos
-        combined_ho = HoQp(combined_foot_task, higher_problem=ho_high, device=dev, dtype=dtype, task_weight=low_priority_weight)
-        return combined_ho.getSolutions()
+        return sol
 
 
 if __name__ == "__main__":
@@ -458,12 +775,35 @@ if __name__ == "__main__":
     info = CentroidalModelInfoSimple(generalizedCoordinatesNum=18, actuatedDofNum=12, numThreeDofContacts=4, robotMass=30.0)
     pino = FakePinocchioInterface(info, device=dev, dtype=dtype)
     w = Wbc(task_file="", pino_interface=pino, info=info, device=dev, dtype=dtype)
+    target_pos = {
+            "com": torch.tensor([0., 0., 0.0], device=dev, dtype=dtype),
+            "LH": torch.tensor([-0.1, 0.5, -0.1], device=dev, dtype=dtype),
+            "LF": torch.tensor([0.1, 0.5, -0.1], device=dev, dtype=dtype),
+            "RF": torch.tensor([0.1, -0.5, -0.2], device=dev, dtype=dtype),
+            "RH": torch.tensor([-0.1, -0.5, -0.1], device=dev, dtype=dtype),
+        }
+
+    target_ori = {
+        "com": torch.eye(3, device=dev, dtype=dtype),
+        "LH": torch.eye(3, device=dev, dtype=dtype),
+        "LF": torch.eye(3, device=dev, dtype=dtype),
+        "RF": torch.eye(3, device=dev, dtype=dtype),
+        "RH": torch.eye(3, device=dev, dtype=dtype),
+    }
+    # w.update_targets(target_pos, target_ori)
 
     # build trivial inputs
-    state_desired = [0.0] * (info.generalizedCoordinatesNum * 2)
-    input_desired = [0.0] * info.actuatedDofNum
-    measured = [0.0] * (info.generalizedCoordinatesNum + info.generalizedCoordinatesNum)
+    measured = torch.tensor([0., 0., 0., 0., 0., 0., 0.,
+                                            0., 0., 0.,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0], dtype=dtype)
+    input_desired = torch.tensor([0., 0., 0.0, 0., 0., 0.,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0,
+                                            0., 0., 0.0], dtype=dtype)
 
-    sol = w.update(state_desired, input_desired, measured, mode=0)
+    sol = w.update( measured, input_desired, mode=0)
     print("Solution vector shape:", sol.shape)
     print("Solution vector:", sol)

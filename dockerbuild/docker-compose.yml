@@ -1,0 +1,20 @@
+services:
+  cusadi:
+    build: .
+    image: cusadi:dev
+    container_name: cusadi_temp
+    network_mode: host
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /dev/dri:/dev/dri:rw
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/snd:/dev/snd
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

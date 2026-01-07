@@ -22,10 +22,10 @@ import torch
 import numpy as np
 
 try:
-    from wbc_ik_qp.tools.axises_mask import AxisesMask
-    from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
-    from wbc_ik_qp.ik import Model_Cusadi  
-    from wbc_ik_qp.ho_qp import Task
+    from tools.axises_mask import AxisesMask
+    from Centroidal import CentroidalModelInfoSimple
+    from ik import Model_Cusadi  
+    from ho_qp import Task
 except ImportError:
     # Fallback imports for testing environments
     print("Warning: Some dependencies not available, using fallbacks for OrientationTask")
@@ -43,19 +43,19 @@ except ImportError:
         def apply(self, tensor):
             return tensor
     
-    class CentroidalModelInfoSimple:
-        def __init__(self, generalizedCoordinatesNum=12, actuatedDofNum=12, numThreeDofContacts=4):
-            self.generalizedCoordinatesNum = generalizedCoordinatesNum
-            self.actuatedDofNum = actuatedDofNum
-            self.numThreeDofContacts = numThreeDofContacts
-            self.state = torch.zeros(generalizedCoordinatesNum)
-            self.input = torch.zeros(actuatedDofNum)
+    # class CentroidalModelInfoSimple:
+    #     def __init__(self, generalizedCoordinatesNum=12, actuatedDofNum=12, numThreeDofContacts=4):
+    #         self.generalizedCoordinatesNum = generalizedCoordinatesNum
+    #         self.actuatedDofNum = actuatedDofNum
+    #         self.numThreeDofContacts = numThreeDofContacts
+    #         self.state = torch.zeros(generalizedCoordinatesNum)
+    #         self.input = torch.zeros(actuatedDofNum)
         
-        def getstate(self):
-            return self.state
+    #     def getstate(self):
+    #         return self.state
         
-        def getinput(self):
-            return self.input
+    #     def getinput(self):
+    #         return self.input
     
     class Task:
         def __init__(self, a=None, b=None, device=None, dtype=torch.float64, weight=1.0):
@@ -77,6 +77,7 @@ class OrientationTask:
                 self.device = device if device is not None else torch.device('cpu')
                 self.dtype = dtype
                 self.frame_name = frame_name
+                self.error = torch.tensor([0.0, 0.0, 0.0], device=self.device, dtype=self.dtype)
 
                 # robot interface (fake Pinocchio-like wrapper)
                 # Allow injection of a robot; if Model_Cusadi construction fails (missing
@@ -236,7 +237,7 @@ class OrientationTask:
                 if trace_R > 2.9:  # Close to identity (trace = 3 for identity)
                     # Small angle approximation: extract skew-symmetric part
                     skew_sym = (R_error - R_error.T) / 2
-                    error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
+                    self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
                                        device=self.device, dtype=self.dtype)
                 else:
                     # Larger rotation: use proper logarithm map
@@ -246,16 +247,16 @@ class OrientationTask:
                     if angle.abs() < 1e-6:
                         # Very small angle, use small angle approximation
                         skew_sym = (R_error - R_error.T) / 2
-                        error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
+                        self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
                                            device=self.device, dtype=self.dtype)
                     else:
                         # Extract axis from skew-symmetric part and scale by angle
                         factor = angle / (2 * torch.sin(angle))
                         skew_sym = (R_error - R_error.T) * factor
-                        error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
+                        self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
                                            device=self.device, dtype=self.dtype)
                 
-                return error
+                return self.error
 
         def type_name(self):
                 return "orientation"

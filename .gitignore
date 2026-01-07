@@ -1,6 +1,12 @@
 __pycache__
 */__pycache__
-build/CMakeFiles
-build/Makefile
+build
 *debug*
+*demo*
 */*.pyc
+*/*test*
+*test*
+*/__init__.py
+__init__.py
+*copy*
+ik_compare.py

@@ -19,10 +19,10 @@ Usage:
 
 from typing import Optional, Sequence
 import torch
-from wbc_ik_qp.tools.axises_mask import AxisesMask
-from wbc_ik_qp.ik import Model_Cusadi
-from wbc_ik_qp.Centroidal import CentroidalModelInfoSimple
-from wbc_ik_qp.ho_qp import Task
+from tools.axises_mask import AxisesMask
+from ik import Model_Cusadi
+from Centroidal import CentroidalModelInfoSimple
+from ho_qp import Task
 
 
 class PositionTask:
@@ -38,6 +38,7 @@ class PositionTask:
                 self.device = device if device is not None else torch.device('cpu')
                 self.dtype = dtype
                 self.frame_name = frame_name
+                self.error = torch.tensor([0.0, 0.0, 0.0], device=self.device, dtype=self.dtype)
 
                 # robot interface (fake Pinocchio-like wrapper)
                 # Allow injection of a robot; if Model_Cusadi construction fails (missing
@@ -99,8 +100,7 @@ class PositionTask:
                 # get current frame position, attitude and jacobian from Model_Cusadi
                 pos = self.robot.getPosition(self.info.getstate(), self.info.getinput(), self.frame_name)
                 att = self.robot.getAttitude(self.info.getstate(), self.info.getinput(), self.frame_name)
-                J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name)
-                
+                J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name) 
 
                 # normalize jacobian shape: CasADi returns [1, 6, nv], we need [3, nv] for position part
                 if not torch.is_tensor(J):
@@ -113,19 +113,15 @@ class PositionTask:
                 # Extract position jacobian (first 3 rows for linear velocity)
                 J_pos = J[:3, :] if J.shape[0] >= 3 else J
                 
-                # Apply DOF filtering based on frame type to match placo's behavior
-                if self.frame_name in ['LF_FOOT', 'LH_FOOT', 'RF_FOOT', 'RH_FOOT']:
-                    # For foot frames, zero out the floating base DOF (first 6 columns)
-                    # Only joint DOF affect foot positions
-                    J_pos_modified = J_pos.clone()
-                    J_pos_modified[:, :6] = 0.0  # Zero out floating base DOF
-                    J_pos = J_pos_modified
-                elif self.frame_name == 'com':
-                    # For COM frame, only use floating base position DOF (first 3 columns)
-                    # Zero out floating base orientation DOF and all joint DOF
-                    J_pos_modified = J_pos.clone()
-                    J_pos_modified[:, 3:] = 0.0  # Zero out orientation DOF (3:6) and joint DOF (6:)
-                    J_pos = J_pos_modified
+                # Apply DOF filtering based on frame type
+                # if self.frame_name == 'com':
+                #     # For COM frame, only use floating base position DOF (first 3 columns)
+                #     # Keep it as 3x18 but zero out orientation and joint DOF
+                #     J_pos_modified = J_pos.clone()
+                #     J_pos_modified[:, 3:] = 0.0  # Zero out orientation DOF (3:6) and joint DOF (6:)
+                #     J_pos = J_pos_modified
+                # For foot frames, keep the full jacobian including base DOF
+                # This matches placo's behavior where base movement affects foot positions
 
                 # set mask and its rotation if local/custom frame used
                 self.mask.set_axises(axises, frame)
@@ -140,13 +136,13 @@ class PositionTask:
                         pass
 
                 # compute error (target_world - current_position)
-                error = target_world - pos
+                self.error = target_world - pos
 
                 # apply mask
                 # debug print (kept minimal)
                 # print("J_pos:", J_pos, "device for J_pos:", J_pos.device)
                 A_masked = self.mask.apply(J_pos)
-                b_masked = self.mask.apply(error)
+                b_masked = self.mask.apply(self.error)
 
                 # If the masked jacobian is all zeros the equality A x = b is
                 # either infeasible (if b != 0) or provides no information. In
@@ -161,6 +157,10 @@ class PositionTask:
                 # Ensure shapes: A_masked should be (m, n) and b_masked (m,)
                 # ho_qp.Task handles empty tensors; just construct and return.
                 return Task(a=A_masked, b=b_masked, device=self.device, dtype=self.dtype, weight=weight)
+
+        def update(self,info: CentroidalModelInfoSimple):
+                """Update internal state from info (if needed)."""
+                self.info = info
 
         def type_name(self):
                 return "position"
