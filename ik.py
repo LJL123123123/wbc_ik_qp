@@ -63,6 +63,8 @@ class Model_Cusadi:
         self.CoM_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_jacobian_world.casadi"))
         self.CoM_jacobian_world_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_com_jacobian_local_world_aligned.casadi"))
+        self.CoM_jacobian_local_world_aligned_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
         # Foot_cusadi
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_position.casadi"))
@@ -109,6 +111,15 @@ class Model_Cusadi:
         self.RH_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
         kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_velocity.casadi"))
         self.RF_FOOT_velocity_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FL_foot_jacobian_local_world_aligned.casadi"))
+        self.LF_FOOT_jacobian_local_world_aligned_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RL_foot_jacobian_local_world_aligned.casadi"))
+        self.LH_FOOT_jacobian_local_world_aligned_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_RR_foot_jacobian_local_world_aligned.casadi"))
+        self.RH_FOOT_jacobian_local_world_aligned_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
+        kinematic_casadi = casadi.Function.load(os.path.join(casadi_dir, f"{robot_name}_FR_foot_jacobian_local_world_aligned.casadi"))
+        self.RF_FOOT_jacobian_local_world_aligned_cusadi = CusadiFunction(kinematic_casadi, BATCH_SIZE, robot_name)
 
     def getPosition(self, x0, u0, __name__):
         # support center-of-mass query
@@ -218,6 +229,29 @@ class Model_Cusadi:
             raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
 
         return jacobian_world
+
+    def getJacobian_local_world_aligned(self, x0, u0, __name__):
+        if __name__.lower() in ("com", "centroid", "center_of_mass"):
+            if getattr(self, 'CoM_jacobian_local_world_aligned_cusadi', None) is None:
+                raise RuntimeError("CoM jacobian local world aligned cusadi function not available")
+            self.CoM_jacobian_local_world_aligned_cusadi.evaluate((x0, u0))
+            jacobian_local_world_aligned = self.CoM_jacobian_local_world_aligned_cusadi.getDenseOutput(0)
+        elif __name__ == "LF_FOOT":
+            self.LF_FOOT_jacobian_local_world_aligned_cusadi.evaluate((x0, u0))
+            jacobian_local_world_aligned = self.LF_FOOT_jacobian_local_world_aligned_cusadi.getDenseOutput(0)
+        elif __name__ == "LH_FOOT":
+            self.LH_FOOT_jacobian_local_world_aligned_cusadi.evaluate((x0, u0))
+            jacobian_local_world_aligned = self.LH_FOOT_jacobian_local_world_aligned_cusadi.getDenseOutput(0)
+        elif __name__ == "RH_FOOT":
+            self.RH_FOOT_jacobian_local_world_aligned_cusadi.evaluate((x0, u0))
+            jacobian_local_world_aligned = self.RH_FOOT_jacobian_local_world_aligned_cusadi.getDenseOutput(0)
+        elif __name__ == "RF_FOOT":
+            self.RF_FOOT_jacobian_local_world_aligned_cusadi.evaluate((x0, u0))
+            jacobian_local_world_aligned = self.RF_FOOT_jacobian_local_world_aligned_cusadi.getDenseOutput(0)
+        else:
+            raise ValueError(f"Unknown frame name for getJacobian: {__name__}")
+
+        return jacobian_local_world_aligned
 
     def getVelocity(self, x0, u0, __name__):
         if __name__.lower() in ("com", "centroid", "center_of_mass"):

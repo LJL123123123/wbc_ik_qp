@@ -82,8 +82,14 @@ class PositionTask:
                 # mask used to select axes (default: keep x,y,z in task/world frame)
                 self.mask = AxisesMask(device=self.device, dtype=self.dtype)
 
-        def as_task(self, target_world: Sequence[float],
-                                axises: str = "xyz", frame: Optional[str] = "task", weight: float = 1.0) -> Task:
+        def as_task(
+                self,
+                target_world: Sequence[float] | torch.Tensor,
+                axises: str = "xyz",
+                frame: Optional[str] = "task",
+                weight: float = 1.0,
+                residual_scale: float | torch.Tensor | None = None,
+        ) -> Task:
                 """Return a `ho_qp.Task` built from this PositionTask.
 
                 Args:
@@ -101,6 +107,21 @@ class PositionTask:
                 pos = self.robot.getPosition(self.info.getstate(), self.info.getinput(), self.frame_name)
                 att = self.robot.getAttitude(self.info.getstate(), self.info.getinput(), self.frame_name)
                 J = self.robot.getJacobian(self.info.getstate(), self.info.getinput(), self.frame_name) 
+
+                # normalize pos to tensor
+                if not torch.is_tensor(pos):
+                        pos = torch.as_tensor(pos, device=self.device, dtype=self.dtype)
+                else:
+                        pos = pos.to(device=self.device, dtype=self.dtype)
+
+                # normalize target_world to tensor
+                if not torch.is_tensor(target_world):
+                        target_world_t = torch.as_tensor(target_world, device=self.device, dtype=self.dtype)
+                else:
+                        target_world_t = target_world.to(device=self.device, dtype=self.dtype)
+                target_world_t = target_world_t.reshape(-1)
+                if target_world_t.numel() != 3:
+                        raise ValueError('target_world must have 3 elements')
 
                 # normalize jacobian shape: CasADi returns [1, 6, nv], we need [3, nv] for position part
                 if not torch.is_tensor(J):
@@ -136,13 +157,29 @@ class PositionTask:
                         pass
 
                 # compute error (target_world - current_position)
-                self.error = target_world - pos
+                self.error = target_world_t - pos.reshape(-1)
+
+                # ---- residual normalization ----
+                # 位置误差单位是 m；经验上把 10cm 作为“1”的尺度。
+                if residual_scale is None:
+                        residual_scale = 0.10
+                if torch.is_tensor(residual_scale):
+                        s = residual_scale.to(device=self.device, dtype=self.dtype).reshape(())
+                        s = torch.clamp(s, min=torch.tensor(1e-12, device=self.device, dtype=self.dtype))
+                        inv_s = 1.0 / s
+                else:
+                        s = max(float(residual_scale), 1e-12)
+                        inv_s = 1.0 / s
 
                 # apply mask
                 # debug print (kept minimal)
                 # print("J_pos:", J_pos, "device for J_pos:", J_pos.device)
                 A_masked = self.mask.apply(J_pos)
                 b_masked = self.mask.apply(self.error)
+
+                # apply normalization (broadcast-safe)
+                A_masked = A_masked * inv_s
+                b_masked = b_masked * inv_s
 
                 # If the masked jacobian is all zeros the equality A x = b is
                 # either infeasible (if b != 0) or provides no information. In

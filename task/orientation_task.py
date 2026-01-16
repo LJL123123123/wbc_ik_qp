@@ -121,8 +121,14 @@ class OrientationTask:
                 # mask used to select axes (default: keep x,y,z in task/world frame)
                 self.mask = AxisesMask(device=self.device, dtype=self.dtype)
 
-        def as_task(self, target_attitude: torch.Tensor,
-                                axises: str = "xyz", frame: Optional[str] = "task", weight: float = 1.0) -> Task:
+        def as_task(
+                self,
+                target_attitude: torch.Tensor,
+                axises: str = "xyz",
+                frame: Optional[str] = "task",
+                weight: float = 1.0,
+                residual_scale: float | torch.Tensor | None = None,
+        ) -> Task:
                 """Return a `ho_qp.Task` built from this OrientationTask.
 
                 Args:
@@ -193,9 +199,28 @@ class OrientationTask:
                 # For small angles: error ≈ log(R_target * R_current^T)
                 error = self.compute_orientation_error(target_attitude, att)
 
+                # ---- residual normalization ----
+                # 让 b 的“典型尺度”接近 1，避免不同 task 单位/量级差异把 QP 条件数拉爆。
+                # 这里采用：A x = b，两边同除以 scale -> (A/scale) x = (b/scale)
+                # weight 仍然走 HoQPLevel 的 sqrt(weight) 机制。
+                if residual_scale is None:
+                    # 姿态误差单位是 rad；经验上把 10deg 作为“1”的尺度比较稳。
+                    residual_scale = float(torch.deg2rad(torch.tensor(10.0)))
+                if torch.is_tensor(residual_scale):
+                    s = residual_scale.to(device=self.device, dtype=self.dtype).reshape(())
+                    s = torch.clamp(s, min=torch.tensor(1e-12, device=self.device, dtype=self.dtype))
+                    inv_s = 1.0 / s
+                else:
+                    s = max(float(residual_scale), 1e-12)
+                    inv_s = 1.0 / s
+
                 # apply mask
                 A_masked = self.mask.apply(J_ang)
                 b_masked = self.mask.apply(error)
+
+                # apply normalization (broadcast-safe)
+                A_masked = A_masked * inv_s
+                b_masked = b_masked * inv_s
 
                 # If the masked jacobian is all zeros the equality A x = b is
                 # either infeasible (if b != 0) or provides no information. In
@@ -212,51 +237,34 @@ class OrientationTask:
                 return Task(a=A_masked, b=b_masked, device=self.device, dtype=self.dtype, weight=weight)
 
         def compute_orientation_error(self, target_R: torch.Tensor, current_R: torch.Tensor) -> torch.Tensor:
-                """Compute orientation error as angular velocity needed to reach target.
-                
-                Uses the log map of the relative rotation: error = log(R_target * R_current^T)
-                For small angles, this gives the axis-angle representation scaled by angle.
-                
-                Args:
-                    target_R: target rotation matrix (3x3)
-                    current_R: current rotation matrix (3x3)
-                    
-                Returns:
-                    error: orientation error vector (3,)
-                """
-                # Compute relative rotation: R_error = R_target * R_current^T
-                R_error = target_R @ current_R.T
-                
-                # For small rotations, use the approximation: log(R) ≈ (R - R^T) / 2
-                # This is the skew-symmetric part of the rotation matrix
-                # For larger rotations, we should use the proper logarithm map
-                
-                # Check if rotation is close to identity (small angle approximation)
-                trace_R = torch.trace(R_error)
-                
-                if trace_R > 2.9:  # Close to identity (trace = 3 for identity)
-                    # Small angle approximation: extract skew-symmetric part
-                    skew_sym = (R_error - R_error.T) / 2
-                    self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
-                                       device=self.device, dtype=self.dtype)
-                else:
-                    # Larger rotation: use proper logarithm map
-                    # angle = arccos((trace(R) - 1) / 2)
-                    angle = torch.acos(torch.clamp((trace_R - 1) / 2, -1.0, 1.0))
-                    
-                    if angle.abs() < 1e-6:
-                        # Very small angle, use small angle approximation
-                        skew_sym = (R_error - R_error.T) / 2
-                        self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
-                                           device=self.device, dtype=self.dtype)
-                    else:
-                        # Extract axis from skew-symmetric part and scale by angle
-                        factor = angle / (2 * torch.sin(angle))
-                        skew_sym = (R_error - R_error.T) * factor
-                        self.error = torch.tensor([skew_sym[2, 1], skew_sym[0, 2], skew_sym[1, 0]], 
-                                           device=self.device, dtype=self.dtype)
-                
-                return self.error
+            R_err = target_R @ current_R.transpose(-1, -2)
+
+            # trace(R) -> cos(theta) = (trace - 1)/2
+            tr = torch.trace(R_err)
+            cos_theta = torch.clamp((tr - 1.0) * 0.5, -1.0, 1.0)
+            theta = torch.acos(cos_theta)  # in [0, pi]
+
+            # vee of skew-symmetric part: vee(R - R^T) = [R32-R23, R13-R31, R21-R12]
+            # We'll compute w = vee(R_err - R_err^T)
+            skew = R_err - R_err.transpose(-1, -2)
+            w = torch.stack([skew[2, 1], skew[0, 2], skew[1, 0]])  # (3,)
+
+            # For small angles, use first-order approximation: log(R) ≈ 0.5 * vee(R - R^T)
+            eps = 1e-6
+            if theta < eps:
+                e = 0.5 * w
+                return e
+
+            # For general case: log(R) = (theta / (2 sin theta)) * vee(R - R^T)
+            sin_theta = torch.sin(theta)
+
+            # Avoid division blow-up extremely close to pi (rare but can happen)
+            # clamp sin_theta to keep numeric stability
+            sin_theta = torch.clamp(sin_theta, min=1e-8)
+
+            scale = theta / (2.0 * sin_theta)
+            e = scale * w
+            return e
 
         def type_name(self):
                 return "orientation"

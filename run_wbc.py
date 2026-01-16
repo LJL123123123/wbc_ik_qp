@@ -24,7 +24,7 @@ sys.path.append('.')
 sys.path.append('/home/wbc_ik_qp')
 
 parser = argparse.ArgumentParser(description='Simple URDF MeshCat viewer (no pinocchio/placo)')
-parser.add_argument('path', help='Path to URDF file')
+parser.add_argument('path',default = "/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf",help='Path to URDF file')
 parser.add_argument('--frames', nargs='+', help='Frame names to display (unused currently)')
 parser.add_argument('--animate', action='store_true', help='Animate joints (sinusoidal)')
 parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')
@@ -72,7 +72,7 @@ viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=m
 wbc.update_targets(target_pos, target_ori)
 
 
-measured = torch.tensor([0., 0., 0.26, 0., 0., 0., 1.,
+measured = torch.tensor([0., 0., 0.26, 0., 0.,  0.149, 0.989,
                                         0., 1.08, -1.80,
                                         0., 1.08, -1.80,
                                         0., 1.08, -1.80,
@@ -84,29 +84,29 @@ input_desired = torch.tensor([0., 0., 0.0, 0., 0., 0.,
                                         0., 0., 0.0],device=device, dtype=dtype)
 
 sol = wbc.update( measured, input_desired, mode=0)
-state_desired = measured
-state_desired[0:3] = measured[0:3] + sol[0:3]
-state_desired[7:19] = measured[7:19] + sol[6:18]
-dt = 0.01
+# state_desired = measured
+# state_desired[0:3] = measured[0:3] + sol[0:3]
+# state_desired[7:19] = measured[7:19] + sol[6:18]
+dt = 0.005
 t = 0.0
 
 # smoothing state for solver outputs to avoid large sudden command jumps
 # prev_sol holds the previous solution vector (torch tensor on device)
-try:
-    prev_sol
-except NameError:
-    prev_sol = sol.clone()
-    # smoothing factor alpha in [0,1], larger -> smoother/slower
-    sol_smooth_alpha = 0.85
-    # max allowed angle step (rad) for orientation increment per control step
-    # this prevents large instantaneous rotations that can destabilize the loop
-    sol_max_angle_step = 0.05  # ~2.8 degrees per dt
-    # dedicated smoothing for orientation increment (phi)
-    sol_phi_smooth_alpha = 0.9
-    try:
-        prev_phi
-    except NameError:
-        prev_phi = torch.zeros((3,), device=device, dtype=dtype)
+# try:
+#     prev_sol
+# except NameError:
+#     prev_sol = sol.clone()
+#     # smoothing factor alpha in [0,1], larger -> smoother/slower
+#     sol_smooth_alpha = 0.85
+#     # max allowed angle step (rad) for orientation increment per control step
+#     # this prevents large instantaneous rotations that can destabilize the loop
+#     sol_max_angle_step = 0.05  # ~2.8 degrees per dt
+#     # dedicated smoothing for orientation increment (phi)
+#     sol_phi_smooth_alpha = 0.9
+#     try:
+#         prev_phi
+#     except NameError:
+#         prev_phi = torch.zeros((3,), device=device, dtype=dtype)
 
 # ------------------ keyboard control setup ------------------
 # we'll read single-key presses non-blocking from stdin. Holding a key

@@ -22,6 +22,33 @@ from pathlib import Path
 from wbc_logger import WbcCsvLogger
 from gait_manager_cuda import GaitCycleManagerCuda, GaitParamsCuda
 
+from tools.integrrate import *
+import casadi as ca
+
+import numpy as np
+
+import reluqp.reluqpth as reluqp
+import reluqp.utils as utils
+F = ca.Function.load("/home/wbc_ik_qp/go2_wbik_qp.casadi")
+
+
+def _to_ca_dm(x, shape=None):
+    """Convert common python/torch/numpy scalars to CasADi DM.
+
+    CasADi `Function` does not accept `torch.Tensor` directly; it expects
+    DM/SX/MX. This helper keeps the call-sites clean and enforces column
+    vector shapes like (n,1) when required.
+    """
+    if isinstance(x, ca.DM):
+        dm = x
+    elif torch.is_tensor(x):
+        dm = ca.DM(x.detach().cpu().numpy())
+    else:
+        dm = ca.DM(x)
+
+    if shape is not None:
+        dm = ca.reshape(dm, shape[0], shape[1])
+    return dm
 
 try:
     from ho_qp import Task, HoQp
@@ -222,6 +249,14 @@ class Wbc:
             "LF": torch.tensor([0.44, 0.27, -0.55], device=self.device, dtype=self.dtype),
             "RF": torch.tensor([0.44, -0.27, -0.55], device=self.device, dtype=self.dtype),
             "RH": torch.tensor([-0.44, -0.27, -0.55], device=self.device, dtype=self.dtype),
+        }
+
+        self.target_init_pos = {
+            "com": torch.tensor([0.0, 0., 0.0], device=self.device, dtype=self.dtype),
+            "LH": torch.tensor([-0.2500,  0.1500, 0.], device=self.device, dtype=self.dtype),
+            "LF": torch.tensor([0.1400, 0.1500, 0.], device=self.device, dtype=self.dtype),
+            "RF": torch.tensor([0.1400, -0.1500, 0.], device=self.device, dtype=self.dtype),
+            "RH": torch.tensor([-0.2500, -0.1500, 0.], device=self.device, dtype=self.dtype),
         }
 
         self.target_ori = {
@@ -437,6 +472,7 @@ class Wbc:
         # state (from info, if available)
         try:
             st = self.info.getstate()
+            # print("state:", st)
             it = self.info.getinput()
             # state assumed to start with COM position
             # and contain base orientation quaternion at indices [3:7] as (x,y,z,w)
@@ -571,64 +607,18 @@ class Wbc:
             except Exception:
                 pass
 
-            state_desired[0:3] = measured_rbd_state[0:3] + sol[0:3]
-            # base orientation update: treat sol[3:6] as small-angle rotation vector (phi)
-            # and integrate it into quaternion state_desired[3:7] (x,y,z,w).
-            try:
-                if measured_rbd_state.numel() >= 7 and sol.numel() >= 6:
-                    # NOTE:
-                    # In this codebase, `sol` is produced by HoQp from kinematic tasks.
-                    # It behaves like an increment per-step, but its absolute scale can
-                    # drift when the optimization becomes ill-conditioned.
-                    # We therefore:
-                    # 1) scale by dt (treat as angular velocity-like increment)
-                    # 2) clamp magnitude to avoid a single bad solve exploding the state
-                    phi = sol[3:6]
-                    # clamp to at most ~10 deg per step (tunable)
-                    phi_norm = torch.linalg.norm(phi)
-                    phi_max = torch.tensor(0.17453292519943295, device=phi.device, dtype=phi.dtype)  # 10 deg
-                    if phi_norm > phi_max:
-                        phi = phi * (phi_max / (phi_norm + 1e-12))
-
-                    angle = torch.linalg.norm(phi)
-                    # small-angle stable conversion
-                    half = 0.5 * angle
-                    axis = phi / (angle + 1e-12)
-                    sin_half = torch.sin(half)
-                    dq = torch.stack([axis[0] * sin_half, axis[1] * sin_half, axis[2] * sin_half, torch.cos(half)])
-
-                    q = measured_rbd_state[3:7]
-                    # Hamilton product q_new = dq ⊗ q
-                    qx, qy, qz, qw = dq[0], dq[1], dq[2], dq[3]
-                    rx, ry, rz, rw = q[0], q[1], q[2], q[3]
-                    vx = qw * rx + rw * qx + (qy * rz - qz * ry)
-                    vy = qw * ry + rw * qy + (qz * rx - qx * rz)
-                    vz = qw * rz + rw * qz + (qx * ry - qy * rx)
-                    vw = qw * rw - (qx * rx + qy * ry + qz * rz)
-                    q_new = torch.stack([vx, vy, vz, vw])
-                    q_new = q_new / (torch.linalg.norm(q_new) + 1e-12)
-                    state_desired[3:7] = q_new
-
-                    # lightweight diagnostics for divergence hunting
-                    try:
-                        self.logger.write_row(
-                            name='sol_norm',
-                            filename='sol_norm_data.csv',
-                            header=['t', 'dp_norm', 'dphi_norm_raw', 'dphi_norm_used'],
-                            row=[
-                                float(self._t),
-                                float(torch.linalg.norm(sol[0:3]).detach().cpu()),
-                                float(torch.linalg.norm(sol[3:6]).detach().cpu()),
-                                float(torch.linalg.norm(phi).detach().cpu()),
-                            ],
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                # never let quaternion integration break the loop
-                pass
-            # joints slice consistent with run_wbc.py: state[7:19] += sol[6:18]
-            state_desired[7:19] = measured_rbd_state[7:19] + sol[6:18]
+            # state_desired = integrate_freeflyer_quat_xyzw(
+            #     measured_rbd_state,
+            #     sol,
+            #     right_multiply=True
+            # )
+            state_desired[0:7] = integrate_freeflyer_quat_xyzw(
+                measured_rbd_state[0:7],
+                sol[0:3],
+                sol[3:6],
+                right_multiply=True
+            )
+            state_desired[7:18] += sol[6:17]
 
         # keep info state updated so downstream kinematics can read it
         try:
@@ -657,112 +647,100 @@ class Wbc:
         device = self.device
         dtype = self.dtype
 
-        self.info.update_state_input(
-            measured_rbd_state,
-            input_desired
-        )
+        # --- force everything onto the configured device (e.g. CUDA) ---
+        if torch.is_tensor(measured_rbd_state):
+            measured_rbd_state = measured_rbd_state.to(device=device, dtype=dtype)
+        else:
+            measured_rbd_state = torch.as_tensor(measured_rbd_state, device=device, dtype=dtype)
+        if torch.is_tensor(input_desired):
+            input_desired = input_desired.to(device=device, dtype=dtype)
+        else:
+            input_desired = torch.as_tensor(input_desired, device=device, dtype=dtype)
 
-        com_weight = 1.0     # Base weight for COM position
-        lf_weight = 1.0      # Base weight for foot position
-        
-        task_com_pos = self.com_PositionTask.as_task(
-            target_world=self.target_pos["com"],
-            axises="xyz",
-            frame="task",
-            weight=com_weight
-        )
-        task_com_ori = self.com_OrientationTask.as_task(
-            target_attitude=self.target_ori["com"],
-            axises="xyz",
-            frame="task",
-            weight=com_weight
-        )
-    # Combine COM position and orientation into the high-priority task so the
-    # optimizer actively tracks both position and attitude of the base.
-        task_com_frame =  task_com_pos + task_com_ori
-        # print('task_com_frame.a_:', task_com_frame.a_)
-        ho_high = HoQp(task_com_frame, higher_problem=None, device=device, dtype=dtype, task_weight=100.0)
+        # Ensure targets live on the same device
+        for k, v in list(self.target_pos.items()):
+            if torch.is_tensor(v):
+                self.target_pos[k] = v.to(device=device, dtype=dtype)
+            else:
+                self.target_pos[k] = torch.as_tensor(v, device=device, dtype=dtype)
+        for k, v in list(self.target_ori.items()):
+            if torch.is_tensor(v):
+                self.target_ori[k] = v.to(device=device, dtype=dtype)
+            else:
+                self.target_ori[k] = torch.as_tensor(v, device=device, dtype=dtype)
 
-        task_LF_pos = self.LF_PositionTask.as_task(
-            target_world=self.target_pos["LF"],
-            axises="xyz",
-            frame="task",
-            weight=lf_weight
-        )
-        task_LH_pos = self.LH_PositionTask.as_task(
-            target_world=self.target_pos["LH"],
-            axises="xyz",
-            frame="task",
-            weight=lf_weight
-        )
-        task_RF_pos = self.RF_PositionTask.as_task(
-            target_world=self.target_pos["RF"],
-            axises="xyz",
-            frame="task",
-            weight=lf_weight
-        )
-        task_RH_pos = self.RH_PositionTask.as_task(
-            target_world=self.target_pos["RH"],
-            axises="xyz",
-            frame="task",
-            weight=lf_weight
-        )
-        constraint = self.base_constraint.as_task(weight=.01)
-        high_priority_weight = 1.0    # Reasonable weight for high priority tasks  
-        low_priority_weight = .1     # Reasonable weight for low priority tasks
-        ho_RF = HoQp(task_LF_pos, higher_problem=None, device=device, dtype=dtype, task_weight=high_priority_weight)
+        # Update info state/input (downstream tasks read from info)
+        self.info.update_state_input(measured_rbd_state, input_desired)
 
-        combined_foot_task = task_LF_pos + task_RF_pos + task_LH_pos + task_RH_pos + constraint
-        const_task = HoQp(constraint, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
-        # print('combined_foot_task.a_:', combined_foot_task.a_)
-        combine_foot_ho = HoQp(combined_foot_task, higher_problem=None, device=device, dtype=dtype, task_weight=low_priority_weight)
-        combined_ho = HoQp(task_com_frame, higher_problem=combine_foot_ho, device=device, dtype=dtype, task_weight=low_priority_weight)
-    # Return the full stacked solution so both high-priority (COM pos+ori)
-    # and lower-priority (foot positions) objectives are considered.
-        # Optionally add base constraint as the lowest-priority task on top of
-        # the existing stack.
+        # self.target_pos["LF"] = self.target_init_pos["LF"]
+        # self.target_pos["LH"] = self.target_init_pos["LH"]
+        # self.target_pos["RF"] = self.target_init_pos["RF"]
+        # self.target_pos["RH"] = self.target_init_pos["RH"]
 
-        sol = combined_ho.getSolutions()
+        # self.target_pos["LF"] = self.robot.getAttitude(self.info.getstate(),self.info.getinput(),"com") @ (self.target_init_pos["LF"])
+        # self.target_pos["LH"] = self.robot.getAttitude(self.info.getstate(),self.info.getinput(),"com") @ self.target_init_pos["LH"]
+        # self.target_pos["RF"] = self.robot.getAttitude(self.info.getstate(),self.info.getinput(),"com") @ self.target_init_pos["RF"]
+        # self.target_pos["RH"] = self.robot.getAttitude(self.info.getstate(),self.info.getinput(),"com") @ self.target_init_pos["RH"]
+        # print('Updated foot targets:')
+        # print('LF target:', self.target_pos["LF"])
+        # print('LH target:', self.target_pos["LH"])
+        # print('RF target:', self.target_pos["RF"])
+        # print('RH target:', self.target_pos["RH"])
 
-        # ---- HoQp debug chain (Hessian conditioning, residual norms, nullspace dims)
-        try:
-            chain = combined_ho.get_debug_chain() if hasattr(combined_ho, 'get_debug_chain') else []
-            # Each entry corresponds to one HoQp level from high->low.
-            # We log a compact per-level line for post-mortem analysis.
-            for lvl, dbg in enumerate(chain):
-                if not isinstance(dbg, dict) or len(dbg) == 0:
-                    continue
+        p_feet_des_val = torch.cat([
+                self.target_pos["LH"],
+                self.target_pos["LF"],
+                self.target_pos["RF"],
+                self.target_pos["RH"],
+            ])
+        x_l_val = torch.tensor([-0.05, -0.05, -0.05,   -0.15, -0.15, -0.15] + [-0.20]*12, device=device, dtype=dtype)
+        x_u_val = torch.tensor([ 0.05,  0.05,  0.05,    0.15,  0.15,  0.15] + [ 0.20]*12, device=device, dtype=dtype)
 
-                # stable columns; missing keys become NaN
-                def _get(key, default=float('nan')):
-                    v = dbg.get(key, default)
-                    try:
-                        return float(v)
-                    except Exception:
-                        return default
+        # CasADi Function only accepts DM/SX/MX; torch.Tensor will raise
+        # NotImplementedError. Also, `wbik_qp` expects column vectors.
+        q_dm = _to_ca_dm(self.info.getstate(), shape=(19, 1))
+        p_trunk_dm = _to_ca_dm(self.target_pos["com"], shape=(3, 1))
+        R_trunk_dm = _to_ca_dm(self.target_ori["com"], shape=(9, 1))
+        p_feet_dm = _to_ca_dm(p_feet_des_val, shape=(12, 1))
 
-                self.logger.write_row(
-                    name=f'hoqp_debug_lvl{lvl}',
-                    filename='hoqp_debug_data.csv',
+
+        w_trunk_pos = 1e6
+        w_trunk_ori = 1e6
+        w_feet = 1e-2
+        lam = 1e-6
+        dt = 1e-2
+        H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
+            p_trunk_dm,
+            R_trunk_dm,
+            p_feet_dm,
+                    w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
+                    lam, dt,         # lam, dt
+                    1, 1)
+
+        H = np.array(H_ca)
+        g = np.array(g_ca).reshape(-1)
+        A = np.array(A_ca)
+        l = np.array(l_ca).reshape(-1)
+        u = np.array(u_ca).reshape(-1)
+
+        model = reluqp.ReLU_QP()
+        model.setup(H, g, A, l, u)
+        sol = model.solve().x
+
+
+        self.logger.write_row(
+                    name=f'casadiqp_debug_lvl',
+                    filename='casadiqp_debug_data.csv',
                     header=[
-                        't', 'level',
-                        'qp_dim', 'H_cond', 'H_min_eig',
-                        'res_task_norm', 'res_task_rms', 'res_task_dim',
-                        'res_stacked_norm', 'res_stacked_rms', 'res_stacked_dim',
-                        'null_prev_dim', 'null_dim', 'A_proj_rank',
-                        'debug_error',
+                        't', 'casadiqp.h_','combined_ho.task_.g_',
+                        'combined_ho.task_.d_','combined_ho.task_.f_',
+                        
                     ],
                     row=[
-                        float(self._t), float(lvl),
-                        _get('qp_dim'), _get('H_cond'), _get('H_min_eig'),
-                        _get('res_task_norm'), _get('res_task_rms'), _get('res_task_dim'),
-                        _get('res_stacked_norm'), _get('res_stacked_rms'), _get('res_stacked_dim'),
-                        _get('null_prev_dim'), _get('null_dim'), _get('A_proj_rank'),
-                        _get('debug_error', 0.0),
-                    ],
-                )
-        except Exception:
-            pass
+                        float(self._t),H ,g ,
+                        A ,l 
+                    ]
+        )
 
         return sol
 
