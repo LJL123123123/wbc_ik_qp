@@ -478,3 +478,5 @@ Placo 用的是 pinocchio::integrate(model, q, dq)，它内部做的是（右乘
 你 debug 里恰好是 yaw≈-1.305rad 时开始指数爆炸，这和“平移增量坐标系用错”高度吻合。
 
 
+# Casadi自带QRQP求解器，已经继承进casadi中，ReLUQP淘汰
+

@@ -30,6 +30,8 @@ import numpy as np
 import reluqp.reluqpth as reluqp
 import reluqp.utils as utils
 F = ca.Function.load("./dockerbuild/cusadi_build/go2_wbik_qp.casadi")
+F_sol = ca.Function.load("./dockerbuild/cusadi_build/wbik_qp.casadi")
+print("F_sol:",F_sol)
 
 
 def _to_ca_dm(x, shape=None):
@@ -638,6 +640,7 @@ class Wbc:
         # CasADi Function only accepts DM/SX/MX; torch.Tensor will raise
         # NotImplementedError. Also, `wbik_qp` expects column vectors.
         q_dm = _to_ca_dm(self.info.getstate(), shape=(19, 1))
+        dq_dm = _to_ca_dm(self.info.getinput(), shape=(18, 1))
         p_trunk_dm = _to_ca_dm(self.target_pos["com"], shape=(3, 1))
         R_trunk_dm = _to_ca_dm(self.target_ori["com"], shape=(9, 1))
         p_feet_dm = _to_ca_dm(p_feet_des_val, shape=(12, 1))
@@ -647,7 +650,7 @@ class Wbc:
         w_trunk_ori = 1e6
         w_feet = 1e-2
         lam = 1e-6
-        dt = 1e-2
+        dt = 1e-1
         H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
             p_trunk_dm,
             R_trunk_dm,
@@ -665,6 +668,21 @@ class Wbc:
         model = reluqp.ReLU_QP()
         model.setup(H, g, A, l, u)
         sol = model.solve().x
+        sol_ca = F_sol(q_dm,
+            p_trunk_dm,
+            R_trunk_dm,
+            p_feet_dm,
+            w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
+            lam, dt,         # lam, dt
+            1, 1,
+            dq_dm
+            )
+        sol_x=sol_ca[0]
+        sol_x_dm = sol_ca[0]  # DM(18x1)
+        sol_x_np = np.array(sol_x_dm, dtype=np.float64).reshape(-1)  # (18,)
+        sol_x = torch.from_numpy(sol_x_np).to(device=device, dtype=dtype)
+        # print("sol_x:",sol_x)
+        # print("sol from reluqp:",sol)
 
 
         self.logger.write_row(
@@ -681,7 +699,7 @@ class Wbc:
                     ]
         )
 
-        return sol
+        return sol_x
 
 
 if __name__ == "__main__":
@@ -722,5 +740,5 @@ if __name__ == "__main__":
                                             0., 0., 0.0], dtype=dtype)
 
     sol = w.update( measured, input_desired, mode=0)
-    print("Solution vector shape:", sol.shape)
+    # print("Solution vector shape:", sol.shape)
     print("Solution vector:", sol)

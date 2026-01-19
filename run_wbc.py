@@ -156,9 +156,9 @@ def key_held(key: str) -> bool:
     return (key in last_pressed) and (now - last_pressed[key] < press_timeout)
 
 # control parameters (you can tune speeds)
-speed_forward = 0.1  # m/s
-speed_lateral = 0.1  # m/s
-yaw_speed = 0.1       # rad/s
+speed_forward = 0.2  # m/s
+speed_lateral = 0.15  # m/s
+yaw_speed = 0.2       # rad/s
 
 # height control: r up / f down. We send it as cmd_vxyz.z (m/s).
 height_max = 0.26

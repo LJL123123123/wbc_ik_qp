@@ -22,7 +22,7 @@ RUN set -eux; \
       ls -R /etc/apt; \
       exit 1; \
     fi && apt-get update
-RUN  apt-get install -y git python3 python3-venv pip iputils-ping curl unzip cmake nvidia-cuda-toolkit \
+RUN  apt-get install -y git python3 python3-venv pip iputils-ping curl unzip cmake nvidia-cuda-toolkit swing \
     && echo "export PATH=/usr/local/cuda/bin:$PATH" >> /root/.bashrc
 
 #poject-env
@@ -40,7 +40,9 @@ RUN git clone https://github.com/se-hwan/cusadi.git && git clone https://github.
 # RUN unzip cusadi-main.zip && rm /home/cusadi-main/src/CusadiFunction.py && unzip ./ReLUQP-py-main.zip 
 # RUN rm cusadi-main.zip ReLUQP-py-main.zip
 WORKDIR /home/casadi/
-RUN  mkdir build && cd build && cmake .. && make -j4 && make install
+RUN  mkdir build && cd build \
+    && cmake ..   -DCMAKE_BUILD_TYPE=Release   -DWITH_PYTHON=ON   -DPYTHON_EXECUTABLE=/root/.venv/cusadi/bin/python   -DCMAKE_INSTALL_PREFIX=/root/.venv/cusadi/ \ 
+    && make -j4 && make install
 
 COPY ./CusadiFunction.py /home/cusadi/src/
 COPY ./make_cusadi.sh /home/cusadi/
