@@ -254,7 +254,7 @@ class URDFMeshcatViewer:
             recurse(model.root, np.eye(4))
             time.sleep(1.0 / rate)
 
-    def animate_state(self, state_desired=np.zeros(12), rate: float = 60.0):
+    def animate_state(self, state_desired=np.zeros(12), rate: float = 60.0 , target_ori=None, target_pos=None):
             # For revolute or continuous joints, drive angle = sin(t)
             model = self.model
             # while True:
@@ -303,9 +303,11 @@ class URDFMeshcatViewer:
             time.sleep(1.0 / rate)
 
 
+
+
 def main():
     parser = argparse.ArgumentParser(description='Simple URDF MeshCat viewer (no pinocchio/placo)')
-    parser.add_argument('path', help='Path to URDF file')
+    parser.add_argument('path', default='/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf', help='Path to URDF file')
     parser.add_argument('--frames', nargs='+', help='Frame names to display (unused currently)')
     parser.add_argument('--animate', action='store_true', help='Animate joints (sinusoidal)')
     parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')

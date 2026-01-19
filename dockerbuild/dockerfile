@@ -1,30 +1,54 @@
-From swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvidia/cuda:12.8.0-base-ubuntu24.04
+# require: cuda:12.3 ,plese find nvidia/cuda  image on https://hub.docker.com/r/nvidia/cuda|https://docker.aityp.com/
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
-
-#base-env
-RUN sed -i "s@http://.*archive.ubuntu.com@https://mirrors.sustech.edu.cn@g" /etc/apt/sources.list && sed -i "s@http://.*archive.ubuntu.com@https://mirrors.sustech.edu.cn@g" /etc/apt/sources.list
-RUN apt-get update && apt update
-RUN apt install git python3-venv python3-full iputils-ping curl unzip pip -y 
+# base-env
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|https://archive.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|https://security.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        /etc/apt/sources.list.d/ubuntu.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|https://archive.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        -e 's|https://security.ubuntu.com/ubuntu|https://mirrors.sustech.edu.cn/ubuntu|g' \
+        /etc/apt/sources.list; \
+    else \
+      echo "No apt sources file found under /etc/apt" >&2; \
+      ls -R /etc/apt; \
+      exit 1; \
+    fi && apt-get update
+RUN  apt-get install -y git python3 python3-venv pip iputils-ping curl unzip cmake nvidia-cuda-toolkit \
+    && echo "export PATH=/usr/local/cuda/bin:$PATH" >> /root/.bashrc
 
 #poject-env
-RUN python3 -m venv ~/.venv/cusadi 
+RUN python3 -m venv ~/.venv/cusadi && echo "source /root/.venv/cusadi/bin/activate" >> /root/.bashrc
 ENV PATH=/root/.venv/cusadi/bin:$PATH
-
-#git clone https://github.com/se-hwan/cusadi.git && git clone https://github.com/RoboticExplorationLab/ReLUQP-py.git
-COPY ./cusadi-main.zip /home
-COPY ./ReLUQP-py-main.zip /home
+RUN pip install ischedule meshcat scipy casadi matplotlib pandas pinocchio placo
 
 WORKDIR /home
-RUN unzip cusadi-main.zip && rm /home/cusadi-main/src/CusadiFunction.py && unzip ./ReLUQP-py-main.zip 
-RUN pip install ischedule mashcat scipy
-COPY ./CusadiFunction.py /home/cusadi-main/src/
+RUN git clone https://github.com/se-hwan/cusadi.git && git clone https://github.com/RoboticExplorationLab/ReLUQP-py.git && git clone https://github.com/casadi/casadi.git
+#if you have the zip file, you can use the following COPY command to replace the git clone command
+#if not, please comment the following two COPY command and uncomment the above git clone command and change the WORKDIR accordingly
+#if from zip 
+# COPY ./cusadi-main.zip /home
+# COPY ./ReLUQP-py-main.zip /home
+# RUN unzip cusadi-main.zip && rm /home/cusadi-main/src/CusadiFunction.py && unzip ./ReLUQP-py-main.zip 
+# RUN rm cusadi-main.zip ReLUQP-py-main.zip
+WORKDIR /home/casadi/
+RUN  mkdir build && cd build && cmake .. && make -j4 && make install
 
-WORKDIR /home/cusadi-main/
-pip install -e .
+COPY ./CusadiFunction.py /home/cusadi/src/
+COPY ./make_cusadi.sh /home/cusadi/
 
-WORKDIR /home/ReLUQP-py-main/
+WORKDIR /home/cusadi/
+RUN pip install -e .
+
+WORKDIR /home/ReLUQP-py/
 RUN  pip install -e .
 
 COPY ./cusadi_build /home
-
-
