@@ -24,14 +24,38 @@ from gait_manager_cuda import GaitCycleManagerCuda, GaitParamsCuda
 
 from tools.integrrate import *
 import casadi as ca
+try:
+    # Preferred: normal import when a proper `cusadi` package exists.
+    from cusadi import *  # type: ignore
+except ModuleNotFoundError:
+    # Fallback: the editable `cusadi` repo that many users install is packaged
+    # incorrectly (it exposes `src` as the package name, not `cusadi`), which
+    # means `pip list` shows cusadi but `import cusadi` fails.
+    # In that case, try importing from that project's `src` package.
+    try:
+        # The developer machine often has cusadi checked out at /home/cusadi-main
+        # and installed as an editable dist that unfortunately does NOT expose a
+        # top-level `cusadi` module. Instead, its python package is named `src`.
+        # We temporarily add that repo root to sys.path and import from it.
+        import sys
+
+        cusadi_repo = "/home/cusadi-main"
+        if cusadi_repo not in sys.path:
+            sys.path.insert(0, cusadi_repo)
+        from src import CusadiFunction  # type: ignore
+    except Exception as e:
+        raise ModuleNotFoundError(
+            "Cannot import `cusadi`. `pip list` may show a cusadi distribution, but it doesn't provide "
+            "an importable `cusadi` module in this environment. I also tried the common editable-layout "
+            "fallback (/home/cusadi-main -> import from its `src` package) and that failed. "
+            f"Original error: {e}"
+        )
 
 import numpy as np
 
 import reluqp.reluqpth as reluqp
 import reluqp.utils as utils
-F = ca.Function.load("./dockerbuild/cusadi_build/go2_wbik_qp.casadi")
-F_sol = ca.Function.load("./dockerbuild/cusadi_build/wbik_qp.casadi")
-print("F_sol:",F_sol)
+F = ca.Function.load("./dockerbuild/cusadi_build/go2/go2_wbik_qp.casadi")
 
 
 def _to_ca_dm(x, shape=None):
@@ -70,16 +94,9 @@ except Exception:
         from ho_qp import Task, HoQp
 
 from Centroidal import CentroidalModelInfoSimple
-# from task.position_task import PositionTask
-# from task.orientation_task import OrientationTask
-# from task.base_constraint_task import BaseConstraintTask
 from ik import Model_Cusadi
 
 @dataclass
-# class WbcTask:
-#     position: PositionTask
-#     orientation: OrientationTask
-#     base_constraint: BaseConstraintTask
 
 class FakePinocchioModel:
     def __init__(self, nq: int):
@@ -153,6 +170,13 @@ class Wbc:
         self.ee_kinematics = ee_kinematics
 
         self.verbose = verbose
+
+        self.robot_name = "go2"
+        self.BATCH_SIZE = 1
+        self.wbik_qp_casadi = ca.Function.load("./dockerbuild/cusadi_build/go2/go2_wbik_qp.casadi")
+        print("WBC: loaded CasADi WBIK QP function from file.",self.wbik_qp_casadi)
+        self.wbik_qp = CusadiFunction(self.wbik_qp_casadi, self.BATCH_SIZE, self.robot_name)
+        print("WBC: loaded CasADi WBIK QP function.",self.wbik_qp)
 
         # --- gait cycle manager (CUDA-friendly) ---
         self.gait = GaitCycleManagerCuda(
@@ -650,40 +674,71 @@ class Wbc:
         w_trunk_ori = 1e6
         w_feet = 1e-2
         lam = 1e-6
-        dt = 1e-1
-        H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
-            p_trunk_dm,
-            R_trunk_dm,
-            p_feet_dm,
-                    w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
-                    lam, dt,         # lam, dt
-                    1, 1)
+        dt = 1.0
+        # H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
+        #     p_trunk_dm,
+        #     R_trunk_dm,
+        #     p_feet_dm,
+        #             w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
+        #             lam, dt,         # lam, dt
+        #             1, 1)
+        
+        # CusadiFunction.evaluate expects a single iterable of torch tensors
+        # shaped as (BATCH_SIZE, nnz_in(i)). Do NOT pass each inpu t as a
+        # separate positional arg.
+        inputs = (
+            torch.as_tensor(np.array(q_dm).reshape(1, -1), device=device, dtype=torch.double),
+            torch.as_tensor(np.array(p_trunk_dm).reshape(1, -1), device=device, dtype=torch.double),
+            torch.as_tensor(np.array(R_trunk_dm).reshape(1, -1), device=device, dtype=torch.double),
+            torch.as_tensor(np.array(p_feet_dm).reshape(1, -1), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[w_trunk_pos]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[w_trunk_ori]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[w_feet]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[lam]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[dt]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[1.0]]), device=device, dtype=torch.double),
+            torch.as_tensor(np.array([[1.0]]), device=device, dtype=torch.double),
+        )
+        self.wbik_qp.evaluate(inputs)
+        # H_ca = self.wbik_qp.getDenseOutput(0)
+        # g_ca = self.wbik_qp.getDenseOutput(1)
+        # A_ca = self.wbik_qp.getDenseOutput(2)
+        # l_ca = self.wbik_qp.getDenseOutput(3)
+        # u_ca = self.wbik_qp.getDenseOutput(4)
+        H_flat = self.wbik_qp.outputs_sparse[0]
+        print("H_flat:", H_flat.shape)
+        H_torch = H_flat.view(-1, 18, 18)  # [B, 18, 18]
+        print("H_torch:", H_torch.shape)
 
-        H = np.array(H_ca)
-        g = np.array(g_ca).reshape(-1)
-        A = np.array(A_ca)
-        l = np.array(l_ca).reshape(-1)
-        u = np.array(u_ca).reshape(-1)
+        g_torch = self.wbik_qp.outputs_sparse[1]  # [B, 18]
+
+        A_flat = self.wbik_qp.outputs_sparse[2]
+        print("A_flat:", A_flat.shape)
+        A_torch = A_flat.view(-1, 18, 18)  # [B, 18, 18]
+
+        l_torch = self.wbik_qp.outputs_sparse[3].view(-1, 18)  # [B, 18]
+        u_torch = self.wbik_qp.outputs_sparse[4].view(-1, 18)  # [B, 18]
+
+        # ---- ReLUQP expects a SINGLE (non-batched) QP: drop batch dim ----
+        Hb = H_torch[0]
+        gb = g_torch[0]
+        Ab = A_torch[0]
+        lb = l_torch[0]
+        ub = u_torch[0]
+
+        # ---- torch -> numpy (avoid numpy 2.0 __array__(copy=...) warning) ----
+        H = Hb.detach().cpu().numpy()
+        g = gb.detach().cpu().numpy().reshape(-1)
+        A = Ab.detach().cpu().numpy()
+        l = lb.detach().cpu().numpy().reshape(-1)
+        u = ub.detach().cpu().numpy().reshape(-1)
+
+        print("l:", l)
+        print("u:", u)
 
         model = reluqp.ReLU_QP()
         model.setup(H, g, A, l, u)
         sol = model.solve().x
-        sol_ca = F_sol(q_dm,
-            p_trunk_dm,
-            R_trunk_dm,
-            p_feet_dm,
-            w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
-            lam, dt,         # lam, dt
-            1, 1,
-            dq_dm
-            )
-        sol_x=sol_ca[0]
-        sol_x_dm = sol_ca[0]  # DM(18x1)
-        sol_x_np = np.array(sol_x_dm, dtype=np.float64).reshape(-1)  # (18,)
-        sol_x = torch.from_numpy(sol_x_np).to(device=device, dtype=dtype)
-        # print("sol_x:",sol_x)
-        # print("sol from reluqp:",sol)
-
 
         self.logger.write_row(
                     name=f'casadiqp_debug_lvl',
@@ -699,7 +754,7 @@ class Wbc:
                     ]
         )
 
-        return sol_x
+        return sol
 
 
 if __name__ == "__main__":

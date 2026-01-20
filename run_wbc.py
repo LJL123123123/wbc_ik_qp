@@ -24,7 +24,7 @@ sys.path.append('.')
 sys.path.append('/home/wbc_ik_qp')
 
 parser = argparse.ArgumentParser(description='Simple URDF MeshCat viewer (no pinocchio/placo)')
-parser.add_argument('path',default = "/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf",help='Path to URDF file')
+parser.add_argument('--path',default = "/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf",help='Path to URDF file')
 parser.add_argument('--frames', nargs='+', help='Frame names to display (unused currently)')
 parser.add_argument('--animate', action='store_true', help='Animate joints (sinusoidal)')
 parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')

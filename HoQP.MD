@@ -183,21 +183,10 @@ b = mask.apply(error) （形状 m）
 
 phi_raw_norm 大约 1e−17
  
-phi_smoothed_norm 也是 
-10
-−
-18
-∼
-10
-−
-17
-10 
-−18
- ∼10 
-−17
+phi_smoothed_norm 也是 10−18～10−17
+
  
-phi_applied_norm 同量级
-这在数值上等价于：每个控制步姿态增量几乎为 0。
+phi_applied_norm 同量级这在数值上等价于：每个控制步姿态增量几乎为 0。
 
 因此：
 
@@ -224,46 +213,7 @@ nullspace 直接变成“只允许 free_dof 的单位基”
 你可以验证：打印/检查 task_com_frame.a_ 哪些列非零，特别是对应 base 旋转的列（通常是索引 3-5 或类似映射）。如果这些列在高层被占用，后续层会没 DOF。
 
 原因 B：你新加的“正则项”倾向把解拉回 0（或 x_prev），而姿态最容易被拉没
-正则项（典型是
-𝑙
-𝑎
-𝑚
-𝑏
-𝑑
-𝑎
-∣
-𝑧
-∣
-2
-lambda
-∣z
-∣ 
-2
-  或
-𝑙
-𝑎
-𝑚
-𝑏
-𝑑
-𝑎
-∣
-𝑥
-−
-𝑥
-𝑝
-𝑟
-𝑒
-𝑣
-∣
-2
-lambda
-∣x−x 
-prev
-​
- 
-∣ 
-2
- ）会让解更“保守”，优先选择小范数、小变化的方向。
+正则项（典型是𝑙𝑎𝑚𝑏𝑑𝑎∣𝑧∣^2或𝑙𝑎𝑚𝑏𝑑𝑎∣𝑥−𝑥_𝑝𝑟𝑒𝑣∣^2）会让解更“保守”，优先选择小范数、小变化的方向。
 
 如果你的姿态任务在数值上：
 
@@ -304,25 +254,8 @@ prev
 task_com_frame 是否真的包含 ori 子任务、它的 a_ 哪些列为非零
 base_constraint 是否在堆叠中进一步限制了姿态 DOF
 正则项具体加在 ho_qp.py 哪一层、是否对所有变量一刀切
-然后我给你一个最小 patch（优先做“去掉双滤波 + base rot 正则降权”），并用你现有 CSV（特别是 sol_phi_data.csv）验证：phi_applied_norm 必须从 
-10
-−
-17
-10 
-−17
-  回到一个合理量级（至少 
-10
-−
-4
-∼
-10
-−
-2
-10 
-−4
- ∼10 
-−2
-  这种能产生可见姿态变化的幅度，具体取决于你的单位/量纲）。
+然后我给你一个最小 patch（优先做“去掉双滤波 + base rot 正则降权”），并用你现有 CSV（特别是 sol_phi_data.csv）验证：phi_applied_norm 必须从 10−1710 −17
+回到一个合理量级（至少 10−4∼10−2  这种能产生可见姿态变化的幅度，具体取决于你的单位/量纲）。
 
 如果你愿意更快定位，你也可以告诉我一句：oriTarget 在你的日志里有没有在某段时间发生过明显变化（比如 yaw 指令）？ 如果有而 phi 仍接近 0，那就更能说明是“通道被冻/被正则吸干”，而不是“目标没变”。
 
@@ -445,38 +378,35 @@ QP 求解本身也不是严格带不等式约束的 QP（更多是近似/正则�
 # 更换思路，wbikqpbuild直接变成wbcikqp.casadi
 验证成功
 
-# Q
-现在wbik在机身角度接近+-pi/2的时候求解器发散了，请帮我找出原因
+# cusadi 目前不支持将包含 Solver（如 conic, nlpsol）的 CasADi 函数编译为 CUDA 代码。
 
-# A
-从你这个 debug.zip 里其实已经能看出“发散”的关键特征，而且它**刚好发生在 yaw 接近 -1.305rad（≈ -75°，逼近 -π/2）**的时候：
+它的用途：加速大规模并行的符号表达式求值（例如：同时在 GPU 上为 10000 个不同的状态计算动力学雅可比矩阵）。
 
-step_norms_data.csv 末段：dp_norm（你把 sol[:3] 当作 base 平移增量）从 0.09 一路指数级涨到 27m。
+它的局限：它无法把一个复杂的、迭代式的数值求解器（如 qrqp）封装进一个 CUDA Kernel 内部。
 
-com_state_data.csv 同一段：com_x, com_y 直接跑到 几十米，而目标 com_target_data.csv 一直在 0.60m 左右。
+当前最好的思路，cusadi for QP build & ReLUQP for solve
 
-这不是“QP 本身突然坏了”，而是一个非常典型的外环积分（integrate）坐标系用错导致的正反馈：误差越大 → 你更新越把位姿推向更错的方向 → 下一步误差更大 → dp 更大 → 爆炸。
+# return torch.sparse_coo_tensor(torch.vstack((env_idx, row_idx, col_idx)),RuntimeError: Sizes of tensors must match except in dimension 0. Expected size 324 but got size 1 for tensor number 1 in the list.
+这个错误发生在 cusadi 将 GPU 计算结果转换为 PyTorch 密集张量（Dense Tensor）的过程中。具体表现为在构建稀疏张量时，环境索引（env_idx）的长度与矩阵行列索引（row_idx, col_idx）的长度不匹配。1. 错误来源深度分析在 src/CusadiFunction.py 的 getDenseOutput 方法中，代码尝试执行以下操作：Python# CusadiFunction.py 约第 56 行
+return torch.sparse_coo_tensor(
+    torch.vstack((env_idx, row_idx, col_idx)), # 报错位置
+    self.output_buffer[idx], 
+    size=(self.n_env, self.output_shapes[idx][0], self.output_shapes[idx][1])
+).to_dense()
+错误核心数值：324 vs 1324：正好是 $18 \times 18$。在你的 wbik_qp 中，Go2 机器人的自由度（$n_q$）通常是 12（关节）+ 6（浮动基座）= 18。因此，QP 问题的 Hessian 矩阵 $H$ 的大小是 $18 \times 18$，总元素刚好是 324。1：这说明 row_idx 或 col_idx 只包含了一个元素。为什么会出现这种不匹配？这是因为 cusadi 在生成代码和加载 .casadi 文件时，对矩阵的稀疏性（Sparsity）处理存在偏差。Sparsity 识别失败：当你在 wbik.py 中调用 update 时，cusadi 内部应该根据 .casadi 文件记录的矩阵结构（Sparsity Pattern）来生成 row_idx 和 col_idx。批处理（Batching/Environments）逻辑错误：env_idx 的长度代表了当前 Batch 中总共要填充的非零元素个数（$N_{envs} \times NNZ_{per\_fn}$）。如果报错说 Expected size 324（来自 env_idx），说明你可能开启了 324 个并行的环境，或者程序误以为有 324 个环境。而 row_idx 只有 size 1，说明它认为每个环境的矩阵只有一个非零元素（可能是因为它把整个 $18 \times 18$ 的矩阵识别成了一个标量，或者识别出了错误的稀疏模式）。2. 结合你上传的文件分析build_wbik_qp_placo_like.py：你在这个脚本中创建了 wbik_qp 函数。它输出的 $H, g, A, l, u$ 中，$H$ 是一个 $18 \times 18$ 的矩阵。go2_generated_wbik_qp.c：这是成功生成的 C 代码。查看其 go2_wbik_qp_sparsity_out 部分，你会发现输出 0（即 $H$）关联的是一个特定的稀疏结构（如 casadi_s5）。CusadiFunction.py：在运行时，cusadi 会加载生成的代码信息。如果生成的 CUDA/C 代码中关于输出维度的元数据与 Python 端的 self.output_shapes 不一致，就会导致在 getDenseOutput 时生成的索引向量长度冲突。3. 解决方案建议这个问题的根源通常在于 cusadi 对 CasADi 矩阵输出的平铺（Flattening）处理在多环境（Parallel Environments）模式下失效了。方案 A：检查 n_env 设置（最可能的原因）检查你的 wbc.py 中初始化 CusadiFunction 时的参数。如果你只想运行一个机器人（Batch Size = 1），请确保 n_env=1。从报错看，env_idx 长度为 324 极其可疑——它似乎把矩阵的元素个数误当成了环境个数。方案 B：手动修正 CusadiFunction.py (针对该 Bug 的临时补丁)在 src/CusadiFunction.py 中，定位到 getDenseOutput 前。打印一下调试信息：Pythonprint(f"DEBUG: n_env={self.n_env}, shape={self.output_shapes[idx]}, nnz={len(self.sp_row[idx])}")
+如果发现 nnz 不等于矩阵形状的乘积，且你使用的是密集矩阵，说明 cusadi 在解析 .casadi 文件的 sparsity 时漏掉了元素。方案 C：强制转换为向量（绕过密集矩阵转换 Bug）在 build_wbik_qp_placo_like.py 中，将输出矩阵先 ca.reshape(H, -1, 1) 变成一列长向量。原因：cusadi 对向量（Vector）的处理远比对矩阵（Matrix）稳定。操作：Python# 在 build_wbik_qp_placo_like.py 修改输出
+F = ca.Function(..., [H, g, A, l, u]) 
+#改为
+F = ca.Function(..., [ca.reshape(H, -1, 1), g, ca.reshape(A, -1, 1), l, u])
+然后在 wbc.py 中拿到输出后再用 PyTorch 的 .view(18, 18) 还原。总结KeyError: 48 是因为你尝试编译求解器（Solver），而这个 RuntimeError 是因为你虽然成功编译了矩阵组装函数，但 cusadi 在处理 Parallel Environments + Matrix Output 时，内部的索引生成逻辑（Tiling logic）发生了错位。建议采用方案 C，将所有输出转为向量，这通常能解决大部分 cusadi 的维度匹配 Bug。
+什么不使用 getDenseOutput？
+getDenseOutput 存在的意义是处理稀疏矩阵（Sparsity），它会把 GPU 上压缩存储的元素通过 row_idx/col_idx 散布到密集矩阵中。 由于：
 
-最可能的根因：你把 dp 当成 world 增量加了，但它其实是 base/local 坐标系的增量
+你已经在生成 .casadi 时使用了 ca.densify()，数据在 GPU 里已经是密集的了。
 
-在 Pinocchio / Placo 的 free-flyer 里，nv=6+nj 的前 6 维是 SE(3) 的切空间增量，默认是右扰动（right-trivialized），也就是**body frame（本体系）**的 twist：
+cusadi 库的索引映射逻辑对展平后的向量有解析 Bug。
 
-x[:3]：本体系线位移/线速度增量（不是 world）
-
-x[3:6]：本体系角增量
-
-Placo 用的是 pinocchio::integrate(model, q, dq)，它内部做的是（右乘）：
-
-𝑇𝑘+1=𝑇𝑘⋅exp(Δ𝜉),Δ𝜉=[Δ𝑝𝑏𝑜𝑑𝑦,Δ𝜔𝑏𝑜𝑑𝑦]Tk+1=Tk⋅exp(Δξ),Δξ=[Δpbody,Δωbody]
-
-所以平移更新必须是：
-
-𝑝𝑤𝑜𝑟𝑙𝑑←𝑝𝑤𝑜𝑟𝑙𝑑+𝑅𝑤𝑜𝑟𝑙𝑑⋅(𝑉(Δ𝜔)Δ𝑝𝑏𝑜𝑑𝑦)pworld←pworld+Rworld⋅(V(Δω)Δpbody)而不是 p_world += dp_body。
-
-当 yaw 变大（接近 ±π/2）时，R_world 把 body-x/body-y 旋到世界坐标，你如果没乘这个 R，修正方向会越来越“侧着来”，于是就出现你 log 里那种“越修越偏、dp 越来越大”的爆炸。
-
-你 debug 里恰好是 yaw≈-1.305rad 时开始指数爆炸，这和“平移增量坐标系用错”高度吻合。
+所以，直接使用 outputs = self.wbik_qp(...) 返回的原始 Tensor 是最快、最稳定、最节省显存的做法。
 
 
-# Casadi自带QRQP求解器，已经继承进casadi中，ReLUQP淘汰
 
