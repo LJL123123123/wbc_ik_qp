@@ -156,9 +156,9 @@ def key_held(key: str) -> bool:
     return (key in last_pressed) and (now - last_pressed[key] < press_timeout)
 
 # control parameters (you can tune speeds)
-speed_forward = 0.2  # m/s
-speed_lateral = 0.15  # m/s
-yaw_speed = 0.2       # rad/s
+speed_forward = 1.0  # m/s
+speed_lateral = 0.5  # m/s
+yaw_speed = 0.5       # rad/s
 
 # height control: r up / f down. We send it as cmd_vxyz.z (m/s).
 height_max = 0.26
@@ -222,6 +222,10 @@ def loop():
         vy -= speed_lateral
 
     yaw_rate_cmd = 0.0
+    if key_held('q'):
+        yaw_rate_cmd += yaw_speed
+    if key_held('e'):
+        yaw_rate_cmd -= yaw_speed
 
     vz = 0.0
     if key_held('r'):

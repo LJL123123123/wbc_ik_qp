@@ -28,10 +28,11 @@ RUN  apt-get install -y git python3 python3-venv pip iputils-ping curl unzip cma
 #poject-env
 RUN python3 -m venv ~/.venv/cusadi && echo "source /root/.venv/cusadi/bin/activate" >> /root/.bashrc
 ENV PATH=/root/.venv/cusadi/bin:$PATH
-RUN pip install ischedule meshcat scipy casadi matplotlib pandas pinocchio placo
+RUN pip install ischedule meshcat scipy casadi matplotlib pandas pinocchio placo qpth
 
 WORKDIR /home
-RUN git clone https://github.com/se-hwan/cusadi.git && git clone https://github.com/RoboticExplorationLab/ReLUQP-py.git && git clone https://github.com/casadi/casadi.git
+RUN git clone https://github.com/se-hwan/cusadi.git && git clone https://github.com/casadi/casadi.git 
+# && git clone https://github.com/RoboticExplorationLab/ReLUQP-py.git 
 #if you have the zip file, you can use the following COPY command to replace the git clone command
 #if not, please comment the following two COPY command and uncomment the above git clone command and change the WORKDIR accordingly
 #if from zip 

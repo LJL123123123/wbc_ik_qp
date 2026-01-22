@@ -116,19 +116,19 @@ class Model_Cusadi:
             if getattr(self, 'CoM_position_cusadi', None) is None:
                 raise RuntimeError("CoM position cusadi function not available")
             self.CoM_position_cusadi.evaluate((x0, u0))
-            position = self.CoM_position_cusadi.getDenseOutput(0)
+            position = self.CoM_position_cusadi.outputs_sparse[0]
         elif __name__ == "LF_FOOT":
             self.LF_FOOT_position_cusadi.evaluate((x0, u0))
-            position = self.LF_FOOT_position_cusadi.getDenseOutput(0)
+            position = self.LF_FOOT_position_cusadi.outputs_sparse[0]
         elif __name__ == "LH_FOOT":
             self.LH_FOOT_position_cusadi.evaluate((x0, u0))
-            position = self.LH_FOOT_position_cusadi.getDenseOutput(0)
+            position = self.LH_FOOT_position_cusadi.outputs_sparse[0]
         elif __name__ == "RH_FOOT":
             self.RH_FOOT_position_cusadi.evaluate((x0, u0))
-            position = self.RH_FOOT_position_cusadi.getDenseOutput(0)
+            position = self.RH_FOOT_position_cusadi.outputs_sparse[0]
         elif __name__ == "RF_FOOT":
             self.RF_FOOT_position_cusadi.evaluate((x0, u0))
-            position = self.RF_FOOT_position_cusadi.getDenseOutput(0)
+            position = self.RF_FOOT_position_cusadi.outputs_sparse[0]
         else:
             raise ValueError(f"Unknown frame name for getPosition: {__name__}")
 

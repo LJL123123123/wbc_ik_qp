@@ -179,11 +179,13 @@ class Wbc:
         print("WBC: loaded CasADi WBIK QP function.",self.wbik_qp)
 
         # --- gait cycle manager (CUDA-friendly) ---
-        self.gait = GaitCycleManagerCuda(
-            device=self.device,
-            dtype=self.dtype,
-            params=GaitParamsCuda(),
-        )
+        params = GaitParamsCuda(mode=0) # 0:Trot, 1:Pace, 2:Gallop
+        self.gait = GaitCycleManagerCuda(device=self.device, dtype=self.dtype, params=params)
+        # self.gait = GaitCycleManagerCuda(
+        #     device=self.device,
+        #     dtype=self.dtype,
+        #     params=GaitParamsCuda(),
+        # )
 
         # --- CSV logger (centralized in WBC) ---
         self.logger = WbcCsvLogger(base_dir=Path('./debug'))
@@ -670,18 +672,24 @@ class Wbc:
         p_feet_dm = _to_ca_dm(p_feet_des_val, shape=(12, 1))
 
 
-        w_trunk_pos = 1e6
-        w_trunk_ori = 1e6
-        w_feet = 1e-2
+        w_trunk_pos = 1e3
+        w_trunk_ori = 1e3
+        w_feet = 1e2
         lam = 1e-6
         dt = 1.0
-        # H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
-        #     p_trunk_dm,
-        #     R_trunk_dm,
-        #     p_feet_dm,
-        #             w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
-        #             lam, dt,         # lam, dt
-        #             1, 1)
+        H_ca,g_ca,A_ca,l_ca,u_ca = F(q_dm,
+            p_trunk_dm,
+            R_trunk_dm,
+            p_feet_dm,
+                    w_trunk_pos, w_trunk_ori, w_feet,      # weights (示例)
+                    lam, dt,         # lam, dt
+                    1, 1)
+
+        H = np.array(H_ca).reshape(18,18)
+        g = np.array(g_ca).reshape(-1)
+        A = np.array(A_ca).reshape(18,18)
+        l = np.array(l_ca).reshape(-1)
+        u = np.array(u_ca).reshape(-1)
         
         # CusadiFunction.evaluate expects a single iterable of torch tensors
         # shaped as (BATCH_SIZE, nnz_in(i)). Do NOT pass each inpu t as a
@@ -705,36 +713,30 @@ class Wbc:
         # A_ca = self.wbik_qp.getDenseOutput(2)
         # l_ca = self.wbik_qp.getDenseOutput(3)
         # u_ca = self.wbik_qp.getDenseOutput(4)
-        H_flat = self.wbik_qp.outputs_sparse[0]
-        print("H_flat:", H_flat.shape)
-        H_torch = H_flat.view(-1, 18, 18)  # [B, 18, 18]
-        print("H_torch:", H_torch.shape)
+        # H_flat = self.wbik_qp.outputs_sparse[0]
+        # H_torch = H_flat.view(-1, 18, 18)  # [B, 18, 18]
 
-        g_torch = self.wbik_qp.outputs_sparse[1]  # [B, 18]
+        # g_torch = self.wbik_qp.outputs_sparse[1]  # [B, 18]
 
-        A_flat = self.wbik_qp.outputs_sparse[2]
-        print("A_flat:", A_flat.shape)
-        A_torch = A_flat.view(-1, 18, 18)  # [B, 18, 18]
+        # A_flat = self.wbik_qp.outputs_sparse[2]
+        # A_torch = A_flat.view(-1, 18, 18)  # [B, 18, 18]
 
-        l_torch = self.wbik_qp.outputs_sparse[3].view(-1, 18)  # [B, 18]
-        u_torch = self.wbik_qp.outputs_sparse[4].view(-1, 18)  # [B, 18]
+        # l_torch = self.wbik_qp.outputs_sparse[3].view(-1, 18)  # [B, 18]
+        # u_torch = self.wbik_qp.outputs_sparse[4].view(-1, 18)  # [B, 18]
 
-        # ---- ReLUQP expects a SINGLE (non-batched) QP: drop batch dim ----
-        Hb = H_torch[0]
-        gb = g_torch[0]
-        Ab = A_torch[0]
-        lb = l_torch[0]
-        ub = u_torch[0]
+        # # ---- ReLUQP expects a SINGLE (non-batched) QP: drop batch dim ----
+        # Hb = H_torch[0]
+        # gb = g_torch[0]
+        # Ab = A_torch[0]
+        # lb = l_torch[0]
+        # ub = u_torch[0]
 
-        # ---- torch -> numpy (avoid numpy 2.0 __array__(copy=...) warning) ----
-        H = Hb.detach().cpu().numpy()
-        g = gb.detach().cpu().numpy().reshape(-1)
-        A = Ab.detach().cpu().numpy()
-        l = lb.detach().cpu().numpy().reshape(-1)
-        u = ub.detach().cpu().numpy().reshape(-1)
-
-        print("l:", l)
-        print("u:", u)
+        # # ---- torch -> numpy (avoid numpy 2.0 __array__(copy=...) warning) ----
+        # H = Hb.detach().cpu().numpy()
+        # g = gb.detach().cpu().numpy().reshape(-1)
+        # A = Ab.detach().cpu().numpy()
+        # l = lb.detach().cpu().numpy().reshape(-1)
+        # u = ub.detach().cpu().numpy().reshape(-1)
 
         model = reluqp.ReLU_QP()
         model.setup(H, g, A, l, u)

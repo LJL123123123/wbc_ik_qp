@@ -408,5 +408,58 @@ cusadi 库的索引映射逻辑对展平后的向量有解析 Bug。
 
 所以，直接使用 outputs = self.wbik_qp(...) 返回的原始 Tensor 是最快、最稳定、最节省显存的做法。
 
+# ReLUQP不支持多batch求解
+更换为qpth
+
+# Q
+可以看到cmd_RF的z就是一直是0,而且也没有更新x与y的target
+
+# A
+通过对您的 wbc_batch.py 和 gait_manager_batch.py 的代码逻辑进行深度复盘，我发现了导致足端 $z$ 轴恒为 0 且 $x, y$ 目标不更新的根本原因。虽然您的 WBC 逻辑是“拿到 target 后严格跟随”，但目前的 wbc_batch 在调用步态管理器时存在一个关键的时间轴冻结问题。核心问题排查1. 时间张量 t_batch 永远为 0在 wbc_batch.py 的 __init__ 中，您初始化了 self.t_batch = torch.zeros((batch_size,), ...)。但在 step_with_cmd 函数中，您只更新了标量时间 self._t += float(dt)，却没有更新张量时间 self.t_batch。后果：传递给步态管理器的 $t$ 永远是 0。步态相位逻辑故障：在 gait_manager_batch.py 中，相位计算为 leg_phase = ((t / period) + offset) % 1.0。如果 $t=0$，相位将永久停留在 offset 处。针对 RF 腿：其 offset 为 0.5。相位停在 0.5 意味着它刚好处于摆动相的起始点。在 Bezier 曲线中，相位为 0 对应的抬升高度恰好是 0，这就是为什么您看到 $z$ 一直是 0。
 
 
+# Q
+很好，现在旋转的问题解决了，但是仍有问题残留 从记录数据可以看到。当comx/ystate接近0的时候，会出现足端规划会出现异常，请你继续解决这个bug
+
+# A
+我把你这次残留的“com x/y state 接近 0 时足端规划异常”定位到了 gait_manager_batch 的落脚更新条件上（不是 wbc_batch / runwbc_batch 的问题）。
+
+根因：落脚更新阈值写死 > 0.98，会被离散相位步长“跳过去”
+
+你现在的典型参数是：
+
+dt = 0.01
+
+gait_period = 0.5
+
+duty_factor = 0.5
+
+则每一步相位增长：
+
+leg_phase 每步增加 dt / T = 0.02
+
+swing_phase = (leg_phase - duty)/(1-duty)，所以 swing_phase 每步增加 0.02 / 0.5 = 0.04
+
+这会导致摆动末端经常出现这种序列（你日志里 18.22/18.23/18.24/18.25 就是这样）：
+
+swing_phase：0.88 → 0.92 → 0.96 → 下一步相位 wrap，直接变成 stance（swing_phase=0）
+
+因为你原来用 swing_phase > 0.98 才更新 last_stance_pos，所以 0.96 这一帧不会更新，下一帧又已经进入 stance 分支，更新逻辑根本不会执行，于是：
+
+足端轨迹在摆动快结束时已经朝“当前周期的 p_end”靠近
+
+但 stance 开始时却仍然用“上一个周期的 last_stance_pos”
+
+结果就是你看到的 足端目标瞬间跳回某个旧点（日志里 RF_target 在 18.24→18.25 的大跳变就是这个）
+
+当 COM 的平移接近 0（尤其原地转向/慢速）时，这种“落脚点预测”和“旧 stance 记忆”的差更明显，所以你更容易观察到“异常”。
+修复：用 dt 自适应的落脚阈值，并在最后一帧直接 snap 到 p_end
+
+我已经把 gait_manager_batch.py 改成了：
+
+根据 dt/(T*(1-duty)) 自动计算 swing_phase 的增量 swing_inc
+
+用 land_threshold = 1 - swing_inc - eps 作为落脚更新阈值
+（在你 dt=0.01 的情况下阈值会变成 0.96，刚好不会漏掉）
+
+同时在最后一帧把输出 pos 直接设为 p_end，消除“最后一帧到 stance 第一帧”的 pop
