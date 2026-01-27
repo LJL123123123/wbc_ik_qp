@@ -1,11 +1,14 @@
+"""Batch run script optimized to reduce CPU↔GPU synchronization.
+
+Optimizations:
+- Preallocate cmd tensors and update with .fill_ (no per-step tensor alloc/clone).
+- Remove .item() / Python if on CUDA tensors (height clamp is vectorized).
+- Decimate visualization (VIS_EVERY steps) to avoid forcing GPU sync at control rate.
 """
-Modified Batch run_wbc.py
-- Supports 2000 robot instances parallel simulation on GPU.
-- Visualizes only the 1st robot (Batch 0) to maintain performance.
-"""
+
 from ischedule import schedule, run_loop
 from Centroidal import CentroidalModelInfoSimple
-from wbc_batch import Wbc  # 使用 batch 版本的 WBC
+from wbc_batch import Wbc
 from ik_visualization import URDFModel, URDFMeshcatViewer
 from ik import Model_Cusadi
 
@@ -17,90 +20,115 @@ import select
 import termios
 import tty
 import atexit
-import os
 
-sys.path.append('.')
-sys.path.append('/home/wbc_ik_qp')
+from torch.profiler import profile, ProfilerActivity
 
-parser = argparse.ArgumentParser(description='Batch URDF Simulation')
-parser.add_argument('--path', default="/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf", help='Path to URDF file')
-parser.add_argument('--batch', type=int, default=2000, help='Batch size')
-parser.add_argument('--no-browser', action='store_true', help='Do not try to open browser automatically')
+sys.path.append(".")
+sys.path.append("/home/wbc_ik_qp")
+
+parser = argparse.ArgumentParser(description="Batch URDF Simulation")
+parser.add_argument("--path", default="/home/wbc_ik_qp/unitree_model/robots/go1_description/urdf/go1.urdf", help="Path to URDF file")
+parser.add_argument("--batch", type=int, default=2000, help="Batch size")
+parser.add_argument("--no-browser", action="store_true", help="Do not try to open browser automatically")
+parser.add_argument("--vis-every", type=int, default=5, help="Visualize every N control steps")
 args = parser.parse_args()
 
-# --- 1. 基础参数与设备设置 ---
+# --- 1. Base params / device ---
 B_SIZE = args.batch
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.float64
 print(f"Initializing Batch WBC with size: {B_SIZE} on {device}")
 
-# --- 2. 初始化批量环境 ---
+# --- 2. Init batch environment ---
 model = URDFModel(args.path)
 info = CentroidalModelInfoSimple(19, 12, 4)
 robot = Model_Cusadi(info, device=device, dtype=dtype)
 wbc = Wbc("", info, batch_size=B_SIZE, device=device, dtype=dtype)
 
-# --- 3. 构造批量初始状态 ---
+# --- 3. Batch initial state ---
 height = 0.26
-# 初始姿态张量化 [B, 19]
-initial_q = torch.tensor([0., 0., 0.26, 0., 0., 0.149, 0.989,
-                          0., 1.08, -1.80,
-                          0., 1.08, -1.80,
-                          0., 1.08, -1.80,
-                          0., 1.08, -1.80], device=device, dtype=dtype)
+initial_q = torch.tensor(
+    [
+        0.0,
+        0.0,
+        height,
+        0.0,
+        0.0,
+        0.149,
+        0.989,
+        0.0,
+        1.08,
+        -1.80,
+        0.0,
+        1.08,
+        -1.80,
+        0.0,
+        1.08,
+        -1.80,
+        0.0,
+        1.08,
+        -1.80,
+    ],
+    device=device,
+    dtype=dtype,
+)
 measured = initial_q.unsqueeze(0).expand(B_SIZE, -1).clone()
-
-# 初始期望输入 [B, 18]
 input_desired = torch.zeros((B_SIZE, 18), device=device, dtype=dtype)
 
-# 批量目标位置 [B, 3]
+# targets
 target_pos = {
-    "com": torch.tensor([0., 0., height], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
-    "LH": torch.tensor([-0.25, 0.15, 0.], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
-    "LF": torch.tensor([0.14, 0.15, 0.], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
-    "RF": torch.tensor([0.14, -0.15, 0.], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
-    "RH": torch.tensor([-0.25, -0.15, 0.], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
-}
-# 批量目标姿态 [B, 3, 3]
-target_ori = {
-    k: torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3, 3).contiguous()
-    for k in ["com", "LH", "LF", "RF", "RH"]
+    "com": torch.tensor([0.0, 0.0, height], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
+    "LH": torch.tensor([-0.25, 0.15, 0.0], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
+    "LF": torch.tensor([0.14, 0.15, 0.0], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
+    "RF": torch.tensor([0.14, -0.15, 0.0], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
+    "RH": torch.tensor([-0.25, -0.15, 0.0], device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3),
 }
 
+target_ori = {k: torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(B_SIZE, 3, 3).contiguous() for k in ["com", "LH", "LF", "RF", "RH"]}
 wbc.update_targets(target_pos, target_ori)
 
-# --- 4. 可视化设置 (仅显示一个实例) ---
+# --- 4. Visualization (show Batch 0 only) ---
 motor_map = {
-    "FL_hip_joint": 7, "FL_thigh_joint": 8, "FL_calf_joint": 9,
-    "RL_hip_joint": 10, "RL_thigh_joint": 11, "RL_calf_joint": 12,
-    "FR_hip_joint": 13, "FR_thigh_joint": 14, "FR_calf_joint": 15,
-    "RR_hip_joint": 16, "RR_thigh_joint": 17, "RR_calf_joint": 18
+    "FL_hip_joint": 7,
+    "FL_thigh_joint": 8,
+    "FL_calf_joint": 9,
+    "RL_hip_joint": 10,
+    "RL_thigh_joint": 11,
+    "RL_calf_joint": 12,
+    "FR_hip_joint": 13,
+    "FR_thigh_joint": 14,
+    "FR_calf_joint": 15,
+    "RR_hip_joint": 16,
+    "RR_thigh_joint": 17,
+    "RR_calf_joint": 18,
 }
-viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=motor_map)
-viewer1 = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=motor_map)
+# viewer = URDFMeshcatViewer(model, open_browser=not args.no_browser, motor_map_=motor_map)
 
-# --- 5. 键盘控制逻辑 (保持全局指令) ---
+# --- 5. Keyboard control ---
 try:
     orig_termios = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
 except Exception:
     orig_termios = None
 
+
 def restore_terminal():
     if orig_termios is not None:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, orig_termios)
+
 
 atexit.register(restore_terminal)
 
 last_pressed = {}
 press_timeout = 0.18
 
+
 def poll_keyboard():
     dr, _, _ = select.select([sys.stdin], [], [], 0)
     if dr:
         ch = sys.stdin.read(1).lower()
         if ch:
-            movement_keys = {'w', 'a', 's', 'd', 'q', 'e', 'r', 'f'}
+            movement_keys = {"w", "a", "s", "d", "q", "e", "r", "f"}
             now = time.time()
             last_pressed[ch] = now
             if ch in movement_keys:
@@ -108,46 +136,54 @@ def poll_keyboard():
                     if k != ch and k in movement_keys:
                         del last_pressed[k]
 
+
 def key_held(key: str) -> bool:
     return (key in last_pressed) and (time.time() - last_pressed[key] < press_timeout)
 
-speed_forward, speed_lateral, yaw_speed, height_speed = 0.8, 0.5, 0.5, 0.05
+
+speed_forward, speed_lateral, yaw_speed, height_speed = 0.8, 0.5, 0.1, 0.05
 height_max, height_min = 0.26, 0.15
 
-# --- 6. 主循环 ---
+# --- 6. Control loop ---
 dt = 0.01
-t = 0.0
+step_k = 0
+VIS_EVERY = max(1, int(args.vis_every))
 
+# Preallocate command tensors (avoid per-step alloc)
+cmd_vxyz = torch.empty((B_SIZE, 3), device=device, dtype=dtype)
+cmd_yaw = torch.empty((B_SIZE, 1), device=device, dtype=dtype)
+
+last_t = time.perf_counter()
+last_k = 0
+ENABLE_PROF = True          # 想关就改 False
+PROF_WARMUP_STEPS = 50      # 先跑 50 步不记录
+PROF_STEPS = 200            # 记录 200 步
+_prof = None
+_step = 0
 @schedule(interval=dt)
 def loop():
-    global t, measured
+    global measured, step_k
     poll_keyboard()
 
-    # 计算全局指令分量
-    vx = speed_forward if key_held('w') else (-speed_forward if key_held('s') else 0.0)
-    vy = speed_lateral if key_held('a') else (-speed_lateral if key_held('d') else 0.0)
-    yaw_rate = yaw_speed if key_held('q') else (-yaw_speed if key_held('e') else 0.0)
-    vz = height_speed if key_held('r') else (-height_speed if key_held('f') else 0.0)
+    # scalar commands from keyboard
+    vx = speed_forward if key_held("w") else (-speed_forward if key_held("s") else 0.0)
+    vy = speed_lateral if key_held("a") else (-speed_lateral if key_held("d") else 0.0)
+    yaw_rate = yaw_speed if key_held("q") else (-yaw_speed if key_held("e") else 0.0)
+    vz = height_speed if key_held("r") else (-height_speed if key_held("f") else 0.0)
 
-    # 简单的批量高度限制检查 (基于 Batch 0)
-    z_now = measured[0, 2].item()
-    if (z_now >= height_max and vz > 0.0) or (z_now <= height_min and vz < 0.0):
-        vz = 0.0
+    # fill batched commands
+    cmd_vxyz[:, 0].fill_(vx)
+    cmd_vxyz[:, 1].fill_(vy)
+    cmd_vxyz[:, 2].fill_(vz)
+    cmd_yaw[:, 0].fill_(yaw_rate)
 
-    # 构造批量指令张量 [B, 3] 和 [B, 1]
-    base_cmd = torch.tensor([vx, vy, vz], device=device, dtype=dtype)
-    cmd_vxyz = base_cmd.repeat(B_SIZE, 1)   # 真复制，每一行独立
-    cmd_vxyz[0] = torch.tensor([0.5, vy, vz], device=device, dtype=dtype)
+    # Vectorized height clamp (no .item(), no Python if)
+    z = measured[:, 2]
+    vz_col = cmd_vxyz[:, 2]
+    clamp_mask = ((z >= height_max) & (vz_col > 0.0)) | ((z <= height_min) & (vz_col < 0.0))
+    cmd_vxyz[:, 2] = torch.where(clamp_mask, torch.zeros_like(vz_col), vz_col)
 
-    # cmd_vxyz[1, :] = 0.0  # 仅 Batch 1 静止（示例）
-    # print(cmd_vxyz[0, :], cmd_vxyz[1, :])
-
-    base_yaw = torch.tensor([yaw_rate], device=device, dtype=dtype)
-    cmd_yaw = base_yaw.repeat(B_SIZE, 1)  # 真复制，每一行独立
-    cmd_yaw[0]= torch.tensor([0.5], device=device, dtype=dtype)
-    cmd_yaw[1]= torch.tensor([-0.6], device=device, dtype=dtype)
-    # 调用批量 WBC 步进
-    # 返回 [B, 19]
+    # WBC step
     state_desired = wbc.step_with_cmd(
         measured_rbd_state=measured,
         input_desired=input_desired,
@@ -156,15 +192,39 @@ def loop():
         cmd_yaw_rate_batch=cmd_yaw,
         mode=0,
     )
-
     measured = state_desired
-    
-    # 仅可视化 Batch 0 的机器人状态
-    # Visualize Batch 0 (keep consistent with LOG_BATCH_IDX default)
-    viewer.animate_state(state_desired=state_desired[0].cpu().detach().numpy(), rate=60.0)
-    viewer1.animate_state(state_desired=state_desired[1].cpu().detach().numpy(), rate=60.0)
-    
-    t += dt
+
+    # visualize (decimated)
+    # if (step_k % VIS_EVERY) == 0:
+    #     viewer.animate_state(state_desired=state_desired[0].cpu().detach().numpy(), rate=60.0)
+
+    step_k += 1
+    global last_t, last_k
+    now = time.perf_counter()
+    if now - last_t > 1.0:
+        print("Hz =", (step_k - last_k) / (now - last_t))
+        last_t, last_k = now, step_k
+    global _prof, _step
+    _step += 1
+
+    # warmup 结束时启动 profiler
+    if ENABLE_PROF and _step == PROF_WARMUP_STEPS:
+        _prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+        )
+        _prof.__enter__()
+
+    # warmup+记录结束时关闭并输出结果
+    if ENABLE_PROF and _step == (PROF_WARMUP_STEPS + PROF_STEPS):
+        _prof.__exit__(None, None, None)
+        print(_prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+        print(_prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
+        # 结束程序（避免继续跑）
+        raise SystemExit
+
 
 print("Batch Simulation Running... Press W/A/S/D to move.")
 run_loop()

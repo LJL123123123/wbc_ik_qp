@@ -32,6 +32,9 @@ except ModuleNotFoundError:
 # 导入并行求解器
 from qpth.qp import QPFunction
 
+def cuda_ms(start, end):
+    return start.elapsed_time(end)
+
 @dataclass
 class Wbc:
     def __init__(self, task_file: str, 
@@ -44,7 +47,7 @@ class Wbc:
         self.BATCH_SIZE = batch_size
         self.LOG_BATCH_IDX = log_batch_idx # 记录索引
         self.plan = None
-        self.verbose = True # 开启日志开关
+        self.verbose = False # 开启日志开关
         # one-time initialization: sync gait manager & WBC targets to measured state
         self._gait_inited = False
         self.robot_name = "go2"
@@ -54,7 +57,7 @@ class Wbc:
         self.wbik_qp = CusadiFunction(self.wbik_qp_casadi, self.BATCH_SIZE, self.robot_name)
 
         # --- 2. 求解器初始化 ---
-        self.qp_solver = QPFunction(verbose=-1) 
+        self.qp_solver = QPFunction(verbose=1, maxIter=10, eps=1e-6) 
 
         # --- 3. 步态管理器 (核心修复点：明确传递 batch_size) ---
         self.cmd_vxyz_batch = torch.zeros((batch_size, 3), device=self.device, dtype=self.dtype)
@@ -104,6 +107,8 @@ class Wbc:
         # --- 5. 限制与参数 (Batched) ---
         self.torque_limits_ = torch.ones((self.BATCH_SIZE, info.actuatedDofNum), device=self.device, dtype=self.dtype) * 50.0
         self._t = 0.0
+
+        print(f"[WbcBatch] Initialized with batch size: {self.BATCH_SIZE} on device: {self.device}, dtype: {self.dtype}")
 
     def reset_batch(self, batch_idx: int):
         """
@@ -265,6 +270,7 @@ class Wbc:
             self.target_pos[k].copy_(target_pos[k])
         self.target_ori["com"].copy_(target_ori["com"])
 
+    @torch.no_grad()
     def update(self, measured_rbd_state: torch.Tensor, input_desired: torch.Tensor, mode: int):
         B = self.BATCH_SIZE
         device = self.device
@@ -297,7 +303,12 @@ class Wbc:
             torch.ones((B, 1), device=device, dtype=dtype),
             torch.ones((B, 1), device=device, dtype=dtype)
         )
+
+        s1 = torch.cuda.Event(enable_timing=True); e1 = torch.cuda.Event(enable_timing=True)
+        s2 = torch.cuda.Event(enable_timing=True); e2 = torch.cuda.Event(enable_timing=True)
+        s1.record()
         self.wbik_qp.evaluate(inputs)
+        e1.record()
 
         # 3. 提取矩阵并转换为 qpth 格式 (Gx <= h)
         H = self.wbik_qp.outputs_sparse[0].view(B, 18, 18)
@@ -310,17 +321,31 @@ class Wbc:
         h = torch.cat([u_constr, -l_constr], dim=1)
 
         # 4. 数值正则化
-        # qpth requires Q to be symmetric PSD
-        Hsym = 0.5 * (H + H.transpose(-1, -2))
-        reg = 1e-4 * torch.eye(18, device=device, dtype=dtype).unsqueeze(0).expand(B, 18, 18)
-        H_reg = Hsym + reg
+        # 4) 数值正则化 & 对称化（qpth 需要 SPD）
+        Hsym = 0.5 * (H + H.transpose(1, 2))
+
+        # float32 数值更敏感，需要更强的对角正则
+        base = 1e-3 if dtype == torch.float32 else 1e-8
+
+        diag = torch.diagonal(Hsym, dim1=-2, dim2=-1)              # [B,18]
+        scale = diag.abs().mean(dim=1).clamp(min=1.0)              # [B]
+        reg = (base * scale).clamp(min=1e-6)                       # [B]
+
+        I = torch.eye(18, device=device, dtype=dtype).unsqueeze(0).expand(B, 18, 18)
+        H_reg = Hsym + reg.view(B, 1, 1) * I
 
         # 5. 并行求解 QP
         e = torch.Tensor().to(device=device, dtype=dtype)
+        s2.record()
         sol = self.qp_solver(H_reg, g, G, h, e, e)
+        e2.record()
+        sol = sol.to(device=measured_rbd_state.device, dtype=measured_rbd_state.dtype)
+
+        # print(f"[WbcBatch] Timings (ms) - QP Setup: {cuda_ms(s1, e1):.3f}, QP Solve: {cuda_ms(s2, e2):.3f}")
 
         return sol
 
+    @torch.no_grad()
     def step_with_cmd(
         self,
         measured_rbd_state: torch.Tensor,
@@ -339,12 +364,16 @@ class Wbc:
         self.cmd_vxyz_batch = cmd_vxyz_batch
         self.cmd_yaw_rate_batch = cmd_yaw_rate_batch
 
+        # 在 step_with_cmd 里（每 N 步打印一次）
+        s0 = torch.cuda.Event(enable_timing=True); e0 = torch.cuda.Event(enable_timing=True)
+        s0.record()
         self.plan = self.gait.update(
             t=self.t_batch,
             cmd_vxyz=self.cmd_vxyz_batch,
             cmd_yaw_rate=self.cmd_yaw_rate_batch,
             dt=dt
         )
+        e0.record()
         self.update_targets(self.plan.target_pos, self.plan.target_ori)
 
         sol = self.update(measured_rbd_state, input_desired, mode=mode)
@@ -355,14 +384,19 @@ class Wbc:
                 pass # 防止日志报错中断控制循环
 
         state_desired = measured_rbd_state.clone()
+        s3 = torch.cuda.Event(enable_timing=True); e3 = torch.cuda.Event(enable_timing=True)
+        s3.record()
         state_desired[:, 0:7] = integrate_freeflyer_quat_xyzw(
             measured_rbd_state[:, 0:7],
             sol[:, 0:3],
             sol[:, 3:6],
             right_multiply=True
         )
+        e3.record()
         # joints are 12 DoF -> indices 7..18 inclusive (slice 7:19)
         state_desired[:, 7:19] += sol[:, 6:18]
+
+        # print(f"[WbcBatch] Timings (ms) - Gait: {cuda_ms(s0, e0):.3f}, State Integrate: {cuda_ms(s3, e3):.3f}")
 
         return state_desired
 

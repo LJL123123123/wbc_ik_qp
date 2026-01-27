@@ -463,3 +463,253 @@ swing_phase：0.88 → 0.92 → 0.96 → 下一步相位 wrap，直接变成 sta
 （在你 dt=0.01 的情况下阈值会变成 0.96，刚好不会漏掉）
 
 同时在最后一帧把输出 pos 直接设为 p_end，消除“最后一帧到 stance 第一帧”的 pop
+
+# Q
+改成了dtype = torch.float32,但是由于cusadi编译的wbikqp库是以double形式进行数据的读取与输出的，所以输出的H会变成torch.float64。如果我将H转变称torch.float32，会使得求解器更快还是系统为了转换数据变得更慢？
+
+追加信息：
+[WbcBatch] Timings (ms) - QP Setup: 2.329, QP Solve: 179.038 [WbcBatch] Timings (ms) - Gait: 71.642, State Integrate: 2.109
+
+
+# A
+方案 1：直接在 runwbc_batch.py 里包住 loop（推荐）
+步骤 1：在文件顶部 import
+
+在 runwbc_batch.py 顶部 import 区加：
+
+from torch.profiler import profile, ProfilerActivity
+
+步骤 2：在全局加几个 profiler 控制变量
+
+放在 run_loop() 之前、或者 if __name__ == "__main__": 之前都行：
+
+ENABLE_PROF = True          # 想关就改 False
+PROF_WARMUP_STEPS = 50      # 先跑 50 步不记录
+PROF_STEPS = 200            # 记录 200 步
+_prof = None
+_step = 0
+
+步骤 3：在 loop() 里插入这段（最关键）
+
+找到 loop() 函数（就是每 dt 调一次那个），在函数开头插入：
+
+global _prof, _step
+_step += 1
+
+# warmup 结束时启动 profiler
+if ENABLE_PROF and _step == PROF_WARMUP_STEPS:
+    _prof = profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        profile_memory=False,
+        with_stack=False,
+    )
+    _prof.__enter__()
+
+# warmup+记录结束时关闭并输出结果
+if ENABLE_PROF and _step == (PROF_WARMUP_STEPS + PROF_STEPS):
+    _prof.__exit__(None, None, None)
+    print(_prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30))
+    print(_prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
+    # 结束程序（避免继续跑）
+    raise SystemExit
+
+步骤 4：确保 loop 内部不要 .cpu() / viewer / csv
+
+你已经关了 viewer/csv 就 OK。profile 期间尽量不要把 tensor 搬回 CPU。
+
+运行
+
+正常运行就行：
+
+WBC_ENABLE_LOG=0 WBC_LOG_FK=0 python runwbc_batch.py --no-browser
+
+
+跑到 warmup+200 步后会自动打印两张表并退出。
+
+According to a document from 2026-01-22（你给的 log.txt profiler 输出），现在 CPU/GPU 都高、但 Hz 不高 的核心原因基本都指向 qpth 的 QP 求解阶段：它在每步里触发了大量 GPU kernel launch + 同步 + 拷贝，CPU 一直在“调度/等待 GPU”，GPU 在做大量小规模 batched 线性代数。
+
+1) profiler 显示真正的瓶颈在哪里？
+A. CPU 端：大量时间花在“等 GPU / 传数据”
+
+你的 profile 里 CPU 自己时间占比前两名就是：
+
+cudaStreamSynchronize：36.05%（3.262s）
+
+cudaMemcpyAsync：21.56%（1.951s）
+这说明 CPU 很多时间不是在算，而是在 同步等待 或 搬运数据。
+
+log
+
+这类同步/拷贝通常来自两种地方：
+
+你代码里任何 .item() / .tolist() / .cpu() / .numpy()（哪怕只取一个标量）都会强制同步；
+
+qpth 内部也会做一些会触发同步/索引的操作（例如 nonzero、arange、index），你这里 aten::nonzero 的 CPU total 也很显著（CPU total 1.039s，9200 次调用）。
+
+log
+
+B. GPU 端：qpth 在解 KKT 线性系统（batched LU / TRSM / GEMM）
+
+从 CUDA 侧看，qpth 的主要开销在 batched 线性代数（LU factor/solve、TRSM、GEMM）：
+
+aten::linalg_lu_factor_ex、aten::linalg_lu_solve 的 CUDA total 很大（例如 lu_solve CUDA total 到 1.185s 量级）。
+
+log
+
+还出现了大量 batched kernel（dgetf2_nopiv_batched_kernel、trsm_batch_* 等）。
+
+log
+
+此外，Cusadi 的 evaluate_kernel 也在 CUDA 里出现，但它量级是 200 次调用总共 ~125ms（约 0.6ms/次），并不是主因。
+
+log
+
+2) 为什么“你修改后 CPU/GPU 都更高”？
+
+从 profiling 角度看，这是符合预期的：
+
+你现在把更多环节放到了 GPU（batch、Cusadi、qpth），GPU 利用率上升很正常；
+
+但 qpth 对这种“小维度(18) + 大 batch(2000)”的 QP，会触发非常多的小 kernel，CPU 需要持续发起 kernel、做同步/索引、管理内存 → CPU 占用也会更高（你 log 里同步/拷贝占了很大头）。
+
+log
+
+3) 你问的 dtype：把 H 转 float32 会更快还是更慢？
+
+结论分两种情况：
+
+情况 1：只把 H 转 float32（其它仍是 float64）
+
+这种通常 不会更快，甚至更慢：
+
+只要 qpth 的输入里混了 float64（比如 g/G/h 还是 float64），很多算子会把 float32 再提升回 float64，你白白多了一次 cast + 额外 copy/临时张量，收益为 0 甚至负收益。
+
+情况 2：QP 全链路都用 float32（H/g/G/h 全部 float32）
+
+这种才可能 显著变快（尤其你现在的求解主要是 LU/TRSM/GEMM），但你已经遇到了 Q is not SPD，原因也典型：
+
+float32 下 对称性误差/舍入误差 会让本来“几乎 SPD”的 H 变得“不够 SPD”（尤其你 lam=1e-6 很小）。
+你 log 里 linalg_cholesky_ex 在 float64 是稳定的
+
+log
+
+，但 float32 下可能需要更强的正则。
+
+如果你想走 float32 这条路，基本要做两件事（缺一不可）：
+
+端到端一致 dtype（Cusadi 输出也最好是 float32；否则每步 cast 的收益会被抵消）
+
+更强的 SPD 修复：H = 0.5*(H+H^T) + reg*I，且 reg 在 float32 下通常要从 1e-6 提到 1e-4 ~ 1e-3（视任务尺度而定）
+
+4) 你现在最该怎么优化？（按收益从大到小）
+优先级 S：减少同步点（直接决定 CPU 高不高、Hz 能不能上去）
+
+请你全局搜一遍这些（哪怕只在 “log 某个 batch_idx” 也会拖慢整个 step）：
+
+.item(), .tolist(), .cpu(), .numpy()
+
+你 wbc_batch.py 里日志写入就包含 .tolist() 和 .item()（会强制同步）。
+
+wbc_batch
+
+
+建议做法：
+
+性能跑的时候 彻底关掉 logger 或改成 每 N 帧才 log 一次；
+
+或者把要 log 的张量先留在 GPU 上累积成 buffer，隔更长时间再一次性 .cpu()。
+
+优先级 A：减少每步的张量构造/填充（降低 kernel 数与 CPU 调度）
+
+你现在每次 update 都 torch.full/torch.ones 造一堆 (B,1) 常量张量。
+
+wbc_batch
+
+
+建议：在 __init__ 里预分配一次，然后每步只 fill_ 更新 dt：
+
+# __init__ 里
+self._w_trunk_pos = torch.full((B,1), 1e3, device=device, dtype=dtype)
+self._w_trunk_ori = torch.full((B,1), 1e3, device=device, dtype=dtype)
+self._w_feet      = torch.full((B,1), 1e2, device=device, dtype=dtype)
+self._lam         = torch.full((B,1), 1e-6, device=device, dtype=dtype)
+self._ones        = torch.ones((B,1), device=device, dtype=dtype)
+self._dt_tensor   = torch.empty((B,1), device=device, dtype=dtype)
+
+# update 里
+self._dt_tensor.fill_(float(self._last_dt))
+inputs = (..., self._w_trunk_pos, self._w_trunk_ori, self._w_feet,
+          self._lam, self._dt_tensor, self._ones, self._ones)
+
+
+这类改动不会像“换 solver”那么夸张，但能明显减少 aten::empty/fill_/arange/index 的压力（你 profile 里这些调用次数非常大）。
+
+log
+
+优先级 A：降低 qpth 求解难度（减少迭代/减少约束）
+
+你现在用 G = [A; -A]、h = [u; -l]，约束数翻倍，qpth 内部还会频繁 nonzero/index。
+
+log
+
+
+如果你的 A 实际接近单位阵（很多 WBIK QP 确实就是对 dx 做 box limit），那你可以把 QP 直接改成 box constraints 形式，甚至进一步换成 bound-constrained 专用算法（会比通用 PDIPM 快很多）。
+
+最简单的验证：打印/统计一下 max|A - I|（只看 batch0 即可）。如果几乎为 0，就说明你现在在白白让 solver 承担“通用线性不等式”的成本。
+
+优先级 B：考虑换 solver
+
+从你的 timing 输出来看，QP solve 每步 100ms+，确实是主矛盾。你有几个方向：
+
+如果允许“软约束”替代硬不等式：直接去掉不等式，只解正则最小二乘（Cholesky）。
+你 profile 里 linalg_cholesky_ex 本身并不贵
+
+log
+
+——真正贵的是通用 QP（LU/迭代/索引）。
+
+试 reluqp：你非 batch 的 wbc.py 里已经引入了 reluqp.reluqpth。
+
+wbc
+
+
+如果这个库在你环境里可用，它通常比 qpth 更适合 GPU 上的小规模 QP（具体要跑对比）。
+
+qpth 调参降低精度/迭代：如果控制上允许近似解，可以尝试把 maxIter 降到 5~10、eps 放宽到 1e-3 量级（不同版本 qpth 参数名略有差异，但思路一样）。
+
+5) 你应该怎么“看时间都消耗在哪”？
+
+你现在已经做对了一半：torch.profiler 输出里最关键的信号是：
+
+CPU：同步/拷贝占比极高
+
+log
+
+→ 先抓 .item()/.cpu() + 减少 kernel 数
+
+CUDA：LU/solve/triangular/batched kernels
+
+log
+
+log
+
+→ solver 本身是硬瓶颈
+
+下一步我建议你再补两份信息（都很容易拿）：
+
+只包住 QP solve 的 profiler（不要把 gait / integrate 混进去），并输出：
+
+sort_by="cpu_time_total" 和 sort_by="cuda_time_total" 各一份 top30
+
+用 nsys（Nsight Systems）跑 2~3 秒（B=2000），你会直观看到 kernel launch 密度、同步点位置（基本能一锤定音到底是哪一行代码在强制 sync）。
+
+如果你愿意，我也可以直接帮你改一版：
+
+彻底去掉所有隐式同步点（日志/打印/标量读取）
+
+把 update 里的常量张量全部预分配
+
+在不改数学的前提下把 qpth 的输入构造压到最少
+
+你把 **runwbc_batch.py 的主 loop（你现在加 profiler 的那段）**贴出来或把你最新的 runwbc_batch.py 发我就行。
